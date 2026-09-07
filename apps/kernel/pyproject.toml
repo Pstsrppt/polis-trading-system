@@ -1,0 +1,17 @@
+[project]
+name = "polis-kernel"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = [
+  "polis-core", "polis-event-bus", "polis-registry",
+  "polis-policy", "polis-observability", "polis-llm",
+  "asyncpg", "qdrant-client>=1.9", "python-telegram-bot>=20.0",
+  "yfinance>=0.2",
+]
+[tool.uv.sources]
+polis-core = { workspace = true }
+polis-event-bus = { workspace = true }
+polis-registry = { workspace = true }
+polis-policy = { workspace = true }
+polis-observability = { workspace = true }
+polis-llm = { workspace = true }

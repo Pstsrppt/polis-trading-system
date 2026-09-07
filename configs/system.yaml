@@ -1,0 +1,10 @@
+system:
+  name: POLIS
+  env: ${ENV}
+  daily_budget_usd: ${DAILY_BUDGET_USD}
+executive_board: [ceo, cto, cfo, coo, cmo]
+divisions: [trading, research, content, finance, lead_gen, saas, hr]
+policy:
+  max_risk_per_trade: 0.005
+  cfo_approval_over_usd: 500
+  min_test_coverage: 0.90

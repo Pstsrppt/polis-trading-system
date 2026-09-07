@@ -1,0 +1,8 @@
+trading:
+  symbol: XAUUSD
+  timeframe: H1
+  strategy: breakout
+  bias: long
+  risk_reward: 3.0
+  entry: bar_close_only
+  max_risk_per_trade: 0.005

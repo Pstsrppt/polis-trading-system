@@ -1,0 +1,8 @@
+[project]
+name = "polis-registry"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = ["polis-core", "polis-llm"]
+[tool.uv.sources]
+polis-core = { workspace = true }
+polis-llm = { workspace = true }

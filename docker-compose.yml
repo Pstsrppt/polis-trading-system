@@ -1,0 +1,130 @@
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     polis
+      POSTGRES_PASSWORD: polis
+      POSTGRES_DB:       polis
+    # ports: ["5433:5432"]  # disabled — accessed internally only
+    volumes: ["pg:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polis -d polis"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports: ["6380:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout:  3s
+      retries:  5
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    # ports: ["6333:6333"]  # disabled — accessed internally only
+    volumes: ["qdrant:/qdrant/storage"]
+
+  # ── POLIS Core ──────────────────────────────────────────────────────────────
+
+  kernel:
+    build:
+      context: .
+      dockerfile: apps/kernel/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_URL:          postgresql://polis:polis@postgres:5432/polis
+      REDIS_URL:             redis://redis:6379/0
+      QDRANT_URL:            http://qdrant:6333
+      SIGNAL_SOURCE:                "twelvedata"
+      SIGNAL_SYMBOLS:               "XAU/USD,EUR/USD,GBP/USD,XAG/USD"
+      TD_POLL_SECONDS:              "1800"
+      WORLD_MODEL_INTERVAL:         "1800"
+      TRADING_HOURS_START:          "0"
+      TRADING_HOURS_END:            "23"
+      CB_MAX_CONSECUTIVE_REJECTS:   "7"
+      MAX_RISK:                     "0.006"
+      ACCOUNT_BALANCE_USD:          "10000"
+      DAILY_BUDGET_USD:             "620"
+      DIVERGENCE_ALERT_THRESHOLD:   "1.0"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      qdrant:   { condition: service_started }
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import redis, os; redis.from_url(os.getenv('REDIS_URL')).ping()\""]
+      interval: 30s
+      timeout:  10s
+      retries:  3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options: { max-size: "10m", max-file: "3" }
+
+  gateway:
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_URL: postgresql://polis:polis@postgres:5432/polis
+      REDIS_URL:    redis://redis:6379/0
+    ports: ["19000:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 15s
+      timeout:  5s
+      retries:  5
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options: { max-size: "10m", max-file: "3" }
+
+  media:
+    build:
+      context: .
+      dockerfile: apps/media/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MEDIA_OUTPUT_DIR: /app/videos
+    ports: ["19002:8001"]
+    volumes:
+      - media_videos:/app/videos
+    logging:
+      driver: "json-file"
+      options: { max-size: "10m", max-file: "3" }
+
+  dashboard:
+    build:
+      context: ./apps/dashboard
+      args:
+        NEXT_PUBLIC_GATEWAY_URL: ${GATEWAY_URL:-http://localhost:19000}
+        NEXT_PUBLIC_GATEWAY_WS:  ${GATEWAY_WS:-ws://localhost:19000/ws/feed}
+        NEXT_PUBLIC_MEDIA_URL:   ${MEDIA_URL:-http://localhost:19002}
+    restart: unless-stopped
+    ports: ["13000:3000"]
+    depends_on:
+      gateway: { condition: service_healthy }
+    logging:
+      driver: "json-file"
+      options: { max-size: "5m", max-file: "2" }
+
+volumes:
+  pg:           {}
+  qdrant:       {}
+  media_videos: {}

@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+node_modules/
+.next/
+dist/
+storage/logs/
+storage/snapshots/
+*.log
+.DS_Store
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# ── excluded sub-projects ──────────────────────────────────
+apps/dashboard/app/(admin)/baccarat/
+apps/dashboard/app/(admin)/media/
+apps/dashboard/app/(admin)/social/
+apps/media/

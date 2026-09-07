@@ -1,0 +1,23 @@
+[project]
+name = "polis"
+version = "1.0.0"
+description = "POLIS — AI Enterprise Operating System"
+requires-python = ">=3.11"
+
+# uv workspace: every app & package is a member, versioned together
+[tool.uv.workspace]
+members = ["apps/*", "packages/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["apps", "packages", "tests"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"

@@ -1,0 +1,238 @@
+.sidebar {
+  width: 216px;
+  min-height: 100vh;
+  background: #ffffff;
+  border-right: 1px solid rgba(0,0,0,0.07);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+/* ── Logo ── */
+.logoArea {
+  padding: 22px 20px 18px;
+}
+.logoRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.logoIcon {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  box-shadow: 0 0 16px rgba(99,102,241,0.25);
+  flex-shrink: 0;
+}
+.logoName {
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  background: linear-gradient(90deg, #0f172a 40%, #475569);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  line-height: 1.1;
+}
+.logoSub {
+  font-size: 9px;
+  color: #94a3b8;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* ── Divider ── */
+.divider {
+  height: 1px;
+  background: rgba(0,0,0,0.06);
+  margin: 0 16px;
+}
+
+/* ── Section label ── */
+.sectionLabel {
+  padding: 16px 20px 8px;
+  font-size: 9px;
+  font-weight: 700;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+/* ── Nav ── */
+.nav {
+  flex: 1;
+  padding: 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.navItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border-radius: 10px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  position: relative;
+}
+.navItem.active {
+  border-left-color: var(--dep-color, #10b981);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--dep-color, #10b981) 10%, transparent), transparent);
+}
+.navItem:hover:not(.active):not(.soon) {
+  background: rgba(0,0,0,0.03);
+}
+.navItem.soon {
+  opacity: 0.4;
+  cursor: default;
+}
+.navIconBox {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  background: rgba(0,0,0,0.03);
+  border: 1px solid rgba(0,0,0,0.06);
+  transition: background 0.15s, border-color 0.15s;
+}
+.navItem.active .navIconBox {
+  background: color-mix(in srgb, var(--dep-color, #10b981) 15%, transparent);
+  border-color: color-mix(in srgb, var(--dep-color, #10b981) 25%, transparent);
+}
+.navLabel {
+  font-size: 13px;
+  font-weight: 400;
+  color: #475569;
+  line-height: 1.2;
+  transition: color 0.15s;
+}
+.navItem.active .navLabel {
+  font-weight: 600;
+  color: var(--dep-color, #10b981);
+}
+.navSub {
+  font-size: 10px;
+  color: #94a3b8;
+  margin-top: 1px;
+}
+.navFlex {
+  flex: 1;
+  min-width: 0;
+}
+.liveDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--dep-color, #10b981);
+  box-shadow: 0 0 6px var(--dep-color, #10b981);
+}
+.soonBadge {
+  font-size: 8px;
+  font-weight: 700;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(0,0,0,0.05);
+  color: #94a3b8;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+.addDept {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border-radius: 10px;
+  margin-top: 6px;
+  cursor: pointer;
+  opacity: 0.4;
+  border: 1px dashed rgba(0,0,0,0.1);
+  transition: opacity 0.15s;
+}
+.addDept:hover { opacity: 0.6; }
+.addIcon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  color: #94a3b8;
+}
+.addLabel {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+/* ── Sub-nav ── */
+.subNav {
+  padding: 2px 0 6px 42px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.subNavItem {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 11px;
+  color: #94a3b8;
+  border-left: 1.5px solid transparent;
+  transition: background 0.15s, color 0.15s;
+  text-decoration: none;
+}
+.subNavItem:hover {
+  background: rgba(0,0,0,0.04);
+  color: #64748b;
+}
+.subNavActive {
+  color: #10b981;
+  border-left-color: rgba(16,185,129,0.5);
+  background: rgba(16,185,129,0.07);
+  font-weight: 600;
+}
+.subNavIcon {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* ── Footer ── */
+.footer {
+  padding: 14px 20px;
+  border-top: 1px solid rgba(0,0,0,0.06);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.footerDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 5px #10b981;
+  flex-shrink: 0;
+}
+.footerText {
+  font-size: 10px;
+  color: #94a3b8;
+}
