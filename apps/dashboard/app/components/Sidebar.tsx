@@ -8,17 +8,10 @@ const DEPARTMENTS: { href:string; icon:string; label:string; sublabel:string; co
 ];
 
 const TRADING_SUB = [
-  { href: "/trading",                icon: "⚡", label: "ภาพรวม"        },
-  { href: "/trading/board",          icon: "🏢", label: "ห้องประชุม"    },
-  { href: "/trading/portfolio",      icon: "💼", label: "พอร์ตโฟลิโอ"  },
-  { href: "/trading/performance",     icon: "📈", label: "Performance"   },
-  { href: "/trading/backtest",        icon: "🧪", label: "Backtest"       },
-  { href: "/trading/calendar",        icon: "📅", label: "Calendar"       },
-  { href: "/trading/hours",           icon: "⏰", label: "Best Hours"     },
-  { href: "/trading/log",             icon: "📋", label: "Trade Log"      },
-  { href: "/trading/soc",            icon: "🛡", label: "ศูนย์ควบคุม"   },
-  { href: "/trading/notifications",  icon: "🔔", label: "การแจ้งเตือน"  },
-  { href: "/trading/settings",       icon: "⚙️", label: "ตั้งค่า"        },
+  { href: "/trading",           icon: "⚡",  label: "ภาพรวม"    },
+  { href: "/trading/analytics", icon: "📊",  label: "Analytics"  },
+  { href: "/trading/tools",     icon: "🔧",  label: "เครื่องมือ" },
+  { href: "/trading/control",   icon: "🛡",  label: "ควบคุม"    },
 ];
 
 export default function Sidebar() {
