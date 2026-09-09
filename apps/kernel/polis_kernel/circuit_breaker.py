@@ -67,7 +67,7 @@ class CircuitBreaker:
         self._redis        = aioredis.from_url(_REDIS_URL)
 
         bus.subscribe("SIGNAL_REJECTED", self._on_reject)
-        bus.subscribe("POLICY_BLOCKED",  self._on_reject)
+        bus.subscribe("POLICY_BLOCKED",  self._on_policy_blocked)
         bus.subscribe("TRADE_APPROVED",  self._on_approved)
         bus.subscribe("TRADE_CLOSED",    self._on_closed)
 
@@ -126,14 +126,22 @@ class CircuitBreaker:
 
     # ── event handlers ────────────────────────────────────────────
     async def _on_reject(self, data: dict) -> None:
+        """SIGNAL_REJECTED — AI decided signal is bad → count toward CB."""
         self._refresh_day()
         self._consec += 1
-        log.debug("CircuitBreaker consec=%d", self._consec)
+        log.debug("CircuitBreaker consec=%d (signal reject)", self._consec)
         await self._save_state()
         if self._consec >= _MAX_CONSEC:
             await self._trigger(
                 f"สัญญาณถูกปฏิเสธ {self._consec} ครั้งติดต่อกัน (threshold={_MAX_CONSEC})"
             )
+
+    async def _on_policy_blocked(self, data: dict) -> None:
+        """POLICY_BLOCKED — system rule blocked (hours, budget, CB) → reset consec, don't count."""
+        self._refresh_day()
+        self._consec = 0
+        log.debug("CircuitBreaker: policy block — consec reset (reason: %s)", data.get("reason", "?"))
+        await self._save_state()
 
     async def _on_closed(self, data: dict) -> None:
         self._refresh_day()
