@@ -6,9 +6,9 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER:     polis
-      POSTGRES_PASSWORD: polis
-      POSTGRES_DB:       polis
+      POSTGRES_USER:     ${POSTGRES_USER:-polis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-polis}
+      POSTGRES_DB:       ${POSTGRES_DB:-polis}
     # ports: ["5433:5432"]  # disabled — accessed internally only
     volumes: ["pg:/var/lib/postgresql/data"]
     healthcheck:

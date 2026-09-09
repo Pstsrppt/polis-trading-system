@@ -1,7 +1,8 @@
 __pycache__/
 *.py[cod]
 .venv/
-.env
+.env*
+!.env.example
 node_modules/
 .next/
 dist/
@@ -12,6 +13,9 @@ storage/snapshots/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+youtube_client_secrets.json
+youtube_token.json
+state.json
 
 # ── excluded sub-projects ──────────────────────────────────
 apps/dashboard/app/(admin)/baccarat/
