@@ -4,13 +4,7 @@ import { usePathname } from "next/navigation";
 import s from "./Sidebar.module.css";
 
 const DEPARTMENTS: { href:string; icon:string; label:string; sublabel:string; color:string; status:"live"|"soon" }[] = [
-  { href: "/trading", icon: "📊", label: "เทรด",           sublabel: "ระบบเทรด AI",              color: "#10b981", status: "live" },
-  { href: "/signals",   icon: "💎", label: "Signal Service", sublabel: "Paid Telegram Signals",  color: "#f59e0b", status: "live" },
-  { href: "/subscribe", icon: "💳", label: "สมัครสมาชิก",   sublabel: "หน้าสมัคร PromptPay",    color: "#10b981", status: "live" },
-  { href: "/finance", icon: "💰", label: "การเงิน",         sublabel: "วิเคราะห์ & กำไรขาดทุน",    color: "#f59e0b", status: "live" },
-  { href: "/media",   icon: "🎬", label: "สตูดิโอสื่อ",     sublabel: "จักรวาลคอนเทนต์ AI",        color: "#818cf8", status: "live" },
-  { href: "/social",  icon: "📱", label: "โซเชียลมีเดีย",   sublabel: "ศูนย์สื่อสาร",              color: "#ec4899", status: "live" },
-  { href: "/baccarat", icon: "🃏", label: "บาคาร่า",       sublabel: "Simulator & Tracker",        color: "#7c3aed", status: "live" },
+  { href: "/trading", icon: "📊", label: "เทรด", sublabel: "ระบบเทรด AI", color: "#10b981", status: "live" },
 ];
 
 const TRADING_SUB = [

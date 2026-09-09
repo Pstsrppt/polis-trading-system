@@ -65,17 +65,38 @@ class TradeTracker:
         trade_id = data.get("db_id")
         if not trade_id:
             return
+        symbol    = data.get("symbol", "XAUUSD")
+        direction = data.get("direction", "long").upper()
+        price     = float(data.get("price", 0))
+        lots      = float(data.get("lots", 0))
+        stop      = float(data.get("stop", 0))
+        conf      = data.get("confidence", "?")
+        risk_usd  = float(data.get("risk_usd", 0))
         self._open[trade_id] = {
             "id":            trade_id,
-            "symbol":        data.get("symbol", "XAUUSD"),
+            "symbol":        symbol,
             "direction":     data.get("direction", "long"),
-            "price":         float(data.get("price", 0)),
-            "stop":          float(data.get("stop", 0)),
-            "lots":          float(data.get("lots", 0)),
+            "price":         price,
+            "stop":          stop,
+            "lots":          lots,
             "trail_sl":      None,
             "breakeven_done": False,
         }
         log.debug("TradeTracker: tracking trade #%d", trade_id)
+        if self._tg:
+            dir_icon = "📈" if direction == "LONG" else "📉"
+            try:
+                await self._tg.notify(
+                    f"{dir_icon}  <b>เปิดเทรดแล้ว — {direction} {symbol}</b>\n\n"
+                    f"💰  Price: <b>{price:.5g}</b>\n"
+                    f"📦  Lots: <b>{lots:.2f}</b>\n"
+                    f"🛡  Stop: <b>{stop:.5g} pts</b>\n"
+                    f"⚠️  Risk: <b>${risk_usd:,.2f}</b>\n"
+                    f"🤖  Confidence: <b>{conf}%</b>\n\n"
+                    f"Trade #{trade_id}"
+                )
+            except Exception as exc:
+                log.warning("Tracker tg open notify failed: %s", exc)
 
     async def _on_tick(self, data: dict) -> None:
         if not self._open:
