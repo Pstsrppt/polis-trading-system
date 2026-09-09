@@ -1,17 +1,17 @@
 "use client";
 import { useState } from "react";
-import SocPage      from "../soc/page";
-import SettingsPage from "../settings/page";
-import BoardPage    from "../board/page";
+import SettingsPage      from "../settings/page";
+import SocPage           from "../soc/page";
+import NotificationsPage from "../notifications/page";
 
 const TABS = [
-  { id: "soc",      label: "🛡 ศูนย์ควบคุม", C: SocPage },
-  { id: "settings", label: "⚙️ ตั้งค่า",      C: SettingsPage },
-  { id: "board",    label: "🏢 ห้องประชุม",   C: BoardPage },
+  { id: "settings",      label: "⚙️ ตั้งค่า",       C: SettingsPage },
+  { id: "soc",           label: "🛡 ระบบ",          C: SocPage },
+  { id: "notifications", label: "🔔 การแจ้งเตือน",  C: NotificationsPage },
 ];
 
 export default function ControlPage() {
-  const [tab, setTab] = useState("soc");
+  const [tab, setTab] = useState("settings");
   const active = TABS.find(t => t.id === tab)!;
   return (
     <div>

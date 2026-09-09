@@ -2,12 +2,10 @@
 import { useState } from "react";
 import LogPage         from "../log/page";
 import PerformancePage from "../performance/page";
-import PortfolioPage   from "../portfolio/page";
 
 const TABS = [
-  { id: "log",         label: "📋 Trade Log",   C: LogPage },
-  { id: "performance", label: "📈 Performance",  C: PerformancePage },
-  { id: "portfolio",   label: "💼 Portfolio",    C: PortfolioPage },
+  { id: "log",         label: "📋 Trade Log",  C: LogPage },
+  { id: "performance", label: "📈 Performance", C: PerformancePage },
 ];
 
 export default function AnalyticsPage() {

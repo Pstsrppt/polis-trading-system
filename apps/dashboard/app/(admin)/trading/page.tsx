@@ -234,7 +234,7 @@ function MiniEquity({pts}:{pts:EquityPoint[]}){
 }
 
 /* ── World Model Panel ───────────────────────────────────────────────── */
-function WorldModelPanel({data}:{data:WorldData}){
+function WorldModelPanel({data,mt5Prices}:{data:WorldData;mt5Prices:Record<string,{bid:number;ask:number;mid:number}>|null}){
   const fgVal  = data.fg_value??null;
   const fgColor= fgVal==null?"#475569":fgVal>=75?"#10b981":fgVal>=60?"#84cc16":fgVal>=40?"#f59e0b":fgVal>=25?"#f97316":"#ef4444";
   const chgFmt = (v:number|undefined)=>v!=null?(v>=0?`+${v.toFixed(2)}%`:`${v.toFixed(2)}%`):null;
@@ -1257,7 +1257,7 @@ export default function TradingPage(){
       <KpiStrip decisions={decisions} events={events} uptimeMs={uptimeMs}/>
 
       <SectionLabel icon="🌍" label="ภาพรวมตลาดโลก" accent="#34d399"/>
-      <WorldModelPanel data={worldData}/>
+      <WorldModelPanel data={worldData} mt5Prices={mt5Prices}/>
 
       {/* Live 3-col */}
       <SectionLabel icon="⚡" label="เหตุการณ์แบบเรียลไทม์" accent="#6366f1"
