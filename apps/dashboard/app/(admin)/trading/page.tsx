@@ -107,7 +107,6 @@ function HealthStrip({status}:{status:SvcStatus}){
     {key:"redis",     label:"Redis"},
     {key:"postgres",  label:"DB"},
     {key:"qdrant",    label:"Qdrant"},
-    {key:"circuit_breaker", label:"CB"},
   ];
   const sc=(s:string)=>s==="ok"?"#10b981":s==="warn"?"#f59e0b":s==="error"?"#ef4444":"#334155";
   const allOk=svcs.every(sv=>normalize(sv.key,status[sv.key]??"loading")==="ok");
@@ -1208,7 +1207,7 @@ export default function TradingPage(){
             background:brokerLive?"rgba(16,185,129,0.1)":"rgba(245,158,11,0.08)",
             border:`1px solid ${brokerLive?"rgba(16,185,129,0.25)":"rgba(245,158,11,0.2)"}`,
             color:brokerLive?"#34d399":"#f59e0b"}}>
-            OANDA {brokerLive?"LIVE":"SIM"}
+            MT5 {brokerLive?"LIVE":"SIM"}
           </div>
           <div style={{display:"flex",alignItems:"center",gap:7,padding:"5px 12px",
             borderRadius:8,background:"rgba(0,0,0,0.03)",border:"1px solid rgba(0,0,0,0.06)"}}>
