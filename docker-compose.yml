@@ -118,6 +118,8 @@ services:
         NEXT_PUBLIC_MEDIA_URL:   ${MEDIA_URL:-http://localhost:19002}
     restart: unless-stopped
     ports: ["13000:3000"]
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
     depends_on:
       gateway: { condition: service_healthy }
     logging:
