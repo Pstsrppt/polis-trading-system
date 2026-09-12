@@ -147,6 +147,12 @@ http://localhost:13000
 
 ---
 
+## เอกสารเพิ่มเติม / Documentation
+
+- [อุปสรรคและบทเรียน / Challenges & Lessons Learned](docs/CHALLENGES.md) — ปัญหาจริงที่เจอระหว่างพัฒนา 9 กลุ่ม พร้อมสาเหตุรากและวิธีแก้
+
+---
+
 ## ผู้พัฒนา / Developer
 
 **Pongsathorn** — นักศึกษาสาขาวิทยาการคอมพิวเตอร์
