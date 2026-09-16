@@ -34,12 +34,16 @@ function toHex(buf: ArrayBuffer): string {
     .join("");
 }
 
-function fromHex(hex: string): ArrayBuffer | null {
+/** Returns a TypedArray, not a bare ArrayBuffer: the Edge runtime's SubtleCrypto
+ *  rejects a plain ArrayBuffer as a signature ("3rd argument is not instance of
+ *  ArrayBuffer, Buffer, TypedArray"), so every session was refused even though
+ *  the signature matched. Building the view over an explicit ArrayBuffer also
+ *  keeps the type as BufferSource for TypeScript. */
+function fromHex(hex: string) {
   if (hex.length === 0 || hex.length % 2 !== 0 || /[^0-9a-f]/i.test(hex)) return null;
-  const buf = new ArrayBuffer(hex.length / 2);
-  const out = new Uint8Array(buf);
+  const out = new Uint8Array(new ArrayBuffer(hex.length / 2));
   for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  return buf;
+  return out;
 }
 
 /** Mint a token valid for `ttlSeconds` (default 7 days, matching the old cookie). */
@@ -67,7 +71,10 @@ export async function verifyToken(secret: string, token: string | undefined): Pr
   try {
     // subtle.verify compares in constant time
     return await crypto.subtle.verify("HMAC", await hmacKey(secret), sig, encoder.encode(payload));
-  } catch {
+  } catch (err) {
+    // Never swallow this silently: a runtime rejection here looks exactly like a
+    // forged token, which once turned a crypto type error into "wrong password".
+    console.error("verifyToken: crypto failure —", err);
     return false;
   }
 }
