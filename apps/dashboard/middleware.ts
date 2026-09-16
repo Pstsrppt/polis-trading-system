@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { authSecret, verifyToken } from "./lib/auth";
 
 const PUBLIC_PATHS = ["/login", "/subscribe", "/api/login"];
 
-export function middleware(req: NextRequest) {
+export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   // Allow public paths
@@ -10,16 +11,20 @@ export function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
-  // Check auth cookie
-  const auth = req.cookies.get("polis_auth")?.value;
-  if (!auth || auth !== "ok") {
+  const toLogin = (err?: string) => {
     const url = req.nextUrl.clone();
     url.pathname = "/login";
     url.searchParams.set("from", pathname);
+    if (err) url.searchParams.set("err", err);
     return NextResponse.redirect(url);
-  }
+  };
 
-  return NextResponse.next();
+  // Without a secret nothing can be verified — refuse rather than let everyone in
+  const secret = authSecret();
+  if (!secret) return toLogin("server_misconfigured");
+
+  const ok = await verifyToken(secret, req.cookies.get("polis_auth")?.value);
+  return ok ? NextResponse.next() : toLogin();
 }
 
 export const config = {
