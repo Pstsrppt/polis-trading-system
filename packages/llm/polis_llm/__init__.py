@@ -14,7 +14,7 @@ from groq import AsyncGroq
 
 log = logging.getLogger("polis.llm")
 
-_GROQ_MODEL        = "llama-3.3-70b-versatile"
+_GROQ_MODEL        = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 _GEMINI_MODEL      = "gemini-2.0-flash-lite"
 _OPENROUTER_MODEL  = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-4-scout:free")
 _OPENROUTER_URL    = "https://openrouter.ai/api/v1/chat/completions"
@@ -44,7 +44,7 @@ class LLMClient:
         if os.environ.get("GROQ_API_KEY"):
             try:
                 resp = await self._groq.chat.completions.create(
-                    model=_GROQ_MODEL,
+                    model=self.model,
                     messages=[
                         {"role": "system", "content": system},
                         {"role": "user",   "content": user},
@@ -53,9 +53,11 @@ class LLMClient:
                 log.debug("Groq OK")
                 return resp.choices[0].message.content or ""
             except Exception as exc:
-                if not _is_quota_error(exc):
-                    raise
-                log.warning("Groq quota exceeded — switching to Gemini")
+                # Fall through on ANY failure, not just quota. A decommissioned
+                # model or a revoked key used to raise here, which skipped the
+                # rest of the chain and degraded every signal to neutral/50%.
+                log.warning("Groq %s (%s) — switching to Gemini",
+                            "quota exceeded" if _is_quota_error(exc) else "failed", exc)
 
         # ── 2. Gemini fallback ─────────────────────────────────────────
         if os.environ.get("GEMINI_API_KEY"):
@@ -70,9 +72,8 @@ class LLMClient:
                 log.info("Gemini OK (Groq fallback)")
                 return resp.text or ""
             except Exception as exc:
-                if not _is_quota_error(exc):
-                    raise
-                log.warning("Gemini quota exceeded — switching to OpenRouter")
+                log.warning("Gemini %s (%s) — switching to OpenRouter",
+                            "quota exceeded" if _is_quota_error(exc) else "failed", exc)
 
         # ── 3. OpenRouter fallback ─────────────────────────────────────
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
