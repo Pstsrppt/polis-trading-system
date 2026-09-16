@@ -122,7 +122,27 @@ class TradeTracker:
         trade_id = data.get("id")
         if trade_id and trade_id in self._open:
             del self._open[trade_id]
-            log.info("TradeTracker: removed #%d (manual close)", trade_id)
+            log.info("TradeTracker: removed #%s (closed outside the tracker)", trade_id)
+
+        # This tracker simulates fills from its own price feed, so its P&L drifts
+        # from the broker's — the same trade was recorded as -$91.99 here and
+        # -$58.14 at MT5. When a real broker closed the position, its number is
+        # the money that actually moved, so let it win.
+        if not trade_id or data.get("source") != "mt5_bridge":
+            return
+        pnl = data.get("pnl_usd")
+        if pnl is None:
+            return
+        try:
+            await self._db.close_trade(
+                int(trade_id),
+                float(data.get("exit_price") or 0),
+                float(pnl),
+                str(data.get("result") or ("WIN" if float(pnl) > 0 else "LOSS")),
+            )
+            log.info("TradeTracker: #%s P&L set from MT5 = $%.2f", trade_id, float(pnl))
+        except Exception as exc:
+            log.warning("TradeTracker: could not apply MT5 P&L for #%s: %s", trade_id, exc)
 
     # ── trailing stop engine ──────────────────────────────────────
     def _update_trail(self, t: dict, price: float) -> None:

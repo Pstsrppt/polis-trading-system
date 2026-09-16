@@ -22,3 +22,6 @@ apps/dashboard/app/(admin)/baccarat/
 apps/dashboard/app/(admin)/media/
 apps/dashboard/app/(admin)/social/
 apps/media/
+
+# Next.js incremental build cache
+apps/dashboard/tsconfig.tsbuildinfo

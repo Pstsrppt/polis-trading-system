@@ -70,6 +70,11 @@ class CircuitBreaker:
         bus.subscribe("POLICY_BLOCKED",  self._on_policy_blocked)
         bus.subscribe("TRADE_APPROVED",  self._on_approved)
         bus.subscribe("TRADE_CLOSED",    self._on_closed)
+        # Until now the only ways out of a tripped breaker were midnight UTC or
+        # the Telegram bot, so a trip during the day halted trading for hours
+        # with no control on the dashboard.
+        bus.subscribe("CIRCUIT_BREAKER_RESET_REQUEST", self._on_reset_request)
+        bus.subscribe("TRADING_RESUMED",               self._on_reset_request)
 
         log.info(
             "CircuitBreaker armed — max_consec=%d  daily_budget=$%.0f  "
@@ -125,6 +130,15 @@ class CircuitBreaker:
             pass
 
     # ── event handlers ────────────────────────────────────────────
+    async def _on_reset_request(self, data: dict) -> None:
+        """Manual reset from the dashboard (or a resume command)."""
+        if not self._triggered:
+            self._consec = 0
+            await self._save_state()
+            return
+        log.info("CircuitBreaker reset requested by %s", data.get("by", "dashboard"))
+        self.reset()
+
     async def _on_reject(self, data: dict) -> None:
         """SIGNAL_REJECTED — AI decided signal is bad → count toward CB."""
         self._refresh_day()
