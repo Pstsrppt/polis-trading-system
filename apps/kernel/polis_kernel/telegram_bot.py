@@ -1,4 +1,5 @@
 """Telegram bot — POLIS command interface via phone."""
+import html
 import json
 import logging
 import os
@@ -13,6 +14,16 @@ _TOKEN          = os.getenv("TELEGRAM_BOT_TOKEN", "")
 _CHAT_ID        = int(os.getenv("TELEGRAM_CHAT_ID", "0"))
 _SIGNAL_CHANNEL = os.getenv("SIGNAL_CHANNEL_ID", "")  # paid channel ID e.g. -1001234567890
 _DIV            = "\n\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+
+def _esc(v: object) -> str:
+    """Escape text going into a parse_mode="HTML" message.
+
+    Rejection reasons read like "confidence 50% < threshold 60%", and Telegram
+    parsed that "<" as the start of a tag: every notification failed with
+    400 "unsupported start tag" and the bot went silent for days.
+    """
+    return html.escape(str(v), quote=False)
 
 
 def _fp(v: float) -> str:
@@ -182,7 +193,7 @@ class TelegramBot:
             f"{icon}  <b>มติคณะกรรมการ POLIS</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📌  การตัดสินใจ:  <b>{res_label}</b>\n\n"
-            f"📋  <i>{directive}</i>\n\n"
+            f"📋  <i>{_esc(directive)}</i>\n\n"
             f"🎯  ความเชื่อมั่น  <b>{conf}%</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )
@@ -198,8 +209,8 @@ class TelegramBot:
         dir_icon  = "📈" if direction == "LONG" else "📉"
         await self.notify(
             f"🚫  <b>สัญญาณถูกบล็อก</b>\n\n"
-            f"{dir_icon}  <b>{direction} {symbol}</b>{conf_line}\n\n"
-            f"<code>⚠️  {reason}</code>"
+            f"{dir_icon}  <b>{direction} {_esc(symbol)}</b>{conf_line}\n\n"
+            f"<code>⚠️  {_esc(reason)}</code>"
         )
 
     async def _on_rejected(self, data: dict) -> None:
@@ -209,10 +220,10 @@ class TelegramBot:
         symbol    = data.get("symbol", "?")
         direction = str(data.get("direction", "")).upper()
         dir_icon  = "📈" if direction == "LONG" else "📉"
-        reason_lines = "\n".join(f"  • {r}" for r in reasons)
+        reason_lines = "\n".join(f"  • {_esc(r)}" for r in reasons)
         await self.notify(
             f"⛔  <b>Signal Rejected</b>\n\n"
-            f"{dir_icon}  <b>{direction} {symbol}</b>\n\n"
+            f"{dir_icon}  <b>{direction} {_esc(symbol)}</b>\n\n"
             f"<code>{reason_lines}</code>"
         )
 
