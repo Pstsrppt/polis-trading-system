@@ -24,7 +24,11 @@ log = logging.getLogger("kernel.filter")
 _ACTIVE_SYMBOLS_KEY  = "polis:active_symbols"
 _NEWS_EVENTS_KEY     = "polis:news_events"   # Redis key for manual news events
 _REDIS_URL           = os.getenv("REDIS_URL", "redis://redis:6379/0")
-_NEWS_BUFFER_MINUTES = int(os.getenv("NEWS_BUFFER_MINUTES", "30"))
+_NEWS_BUFFER_MINUTES = int(os.getenv("NEWS_BUFFER_MINUTES", "30"))   # legacy default
+# Each side of a release is tunable on its own: hold back into the print, then
+# reopen early enough to trade the reaction rather than sitting it out.
+_NEWS_BEFORE_MIN     = int(os.getenv("NEWS_BLOCK_BEFORE_MINUTES", "15"))
+_NEWS_AFTER_MIN      = int(os.getenv("NEWS_BLOCK_AFTER_MINUTES",  "15"))
 _FF_CALENDAR_URL     = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
 # High-impact event keywords to filter
@@ -173,18 +177,27 @@ class SignalFilter:
         return events
 
     async def _is_near_news(self) -> str | None:
-        """Return event title if within ±NEWS_BUFFER_MINUTES of a high-impact event, else None."""
-        if _NEWS_BUFFER_MINUTES <= 0:
+        """Return an event title while trading should be held back, else None.
+
+        The window is one-sided on purpose. Entering as the number prints is the
+        expensive way to trade news: the spread widens several times over, stops
+        slip, and price often takes both directions before choosing one. The
+        move that is actually tradeable is the reaction, so the block covers the
+        release itself and reopens once the market has picked a direction —
+        NEWS_BLOCK_BEFORE_MINUTES before through NEWS_BLOCK_AFTER_MINUTES after.
+        """
+        if _NEWS_BEFORE_MIN <= 0 and _NEWS_AFTER_MIN <= 0:
             return None
         now    = datetime.now(timezone.utc)
-        buf    = timedelta(minutes=_NEWS_BUFFER_MINUTES)
         events = await self._fetch_news_events()
         for ev in events:
             dt = ev["dt"]
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            if abs((now - dt).total_seconds()) <= buf.total_seconds():
-                return ev["title"]
+            delta_min = (now - dt).total_seconds() / 60.0
+            if -_NEWS_BEFORE_MIN <= delta_min <= _NEWS_AFTER_MIN:
+                when = "ก่อนข่าว" if delta_min < 0 else "หลังข่าว"
+                return f"{ev['title']} ({when} {abs(delta_min):.0f} นาที)"
         return None
 
     async def _is_symbol_active(self, symbol: str) -> bool:
@@ -231,8 +244,8 @@ class SignalFilter:
         near_event = await self._is_near_news()
         if near_event:
             log.info(
-                "SIGNAL_SKIPPED (news) %s — within %dmin of '%s'",
-                symbol, _NEWS_BUFFER_MINUTES, near_event,
+                "SIGNAL_SKIPPED (news) %s — blackout -%dmin/+%dmin around '%s'",
+                symbol, _NEWS_BEFORE_MIN, _NEWS_AFTER_MIN, near_event,
             )
             if self._tg:
                 try:
@@ -240,7 +253,8 @@ class SignalFilter:
                         f"📰  <b>News Filter Active</b>\n\n"
                         f"⏸  Skipping {direction.upper()} {symbol}\n"
                         f"📅  Event: <b>{near_event}</b>\n"
-                        f"🕐  ±{_NEWS_BUFFER_MINUTES}min blackout window"
+                        f"🕐  งดเทรด {_NEWS_BEFORE_MIN} นาทีก่อน ถึง {_NEWS_AFTER_MIN} นาทีหลัง\n"
+                        f"✅  เปิดเทรดอีกครั้งหลังจากนั้น เพื่อเล่นปฏิกิริยาแทนตัวข่าว"
                     )
                 except Exception:
                     pass
