@@ -19,6 +19,7 @@ log = logging.getLogger("kernel.trade")
 
 _ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE_USD", "10000"))
 _MAX_RISK_PCT    = float(os.getenv("MAX_RISK", "0.005")) * 100
+_MAX_STOP_PCT    = float(os.getenv("MAX_STOP_PCT", "0.01")) * 100
 
 # ATR baselines per symbol (typical M5 ATR in price units)
 _ATR_BASELINES: dict[str, float] = {
@@ -86,7 +87,8 @@ Respond with JSON ONLY — no markdown, no explanation outside JSON:
 {{"approved": true/false, "confidence": 0-100, "reason": "one concise line"}}
 
 Hard rules:
-- Reject if risk > {_MAX_RISK_PCT:.1f}% of account
+- The "Risk" figure is the stop distance as a share of price, not account risk —
+  position sizing handles account risk. Reject only if it exceeds {_MAX_STOP_PCT:.2f}%
 - Reject if stop < 3x spread (stop too tight, will be hunted by spread)
 - Reject if stop < 1.2x ATR (too tight for volatility)
 Soft rules:

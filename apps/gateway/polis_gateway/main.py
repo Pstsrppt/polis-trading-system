@@ -888,7 +888,7 @@ async def post_settings(request: Request) -> dict:
         await r.hset(_SETTINGS_KEY, "trading_hours_start", val)
         updated["trading_hours_start"] = val
     if "trading_hours_end" in body:
-        val = int(max(0, min(23, int(body["trading_hours_end"]))))
+        val = int(max(0, min(24, int(body["trading_hours_end"]))))   # 24 = through midnight
         await r.hset(_SETTINGS_KEY, "trading_hours_end", val)
         updated["trading_hours_end"] = val
     if "board_interval_s" in body:
