@@ -38,6 +38,18 @@ _RECOVERY_LOSSES   = 3      # consecutive losses → enter recovery (lot ×0.5)
 _RECOVERY_WINS_EXIT = 3     # consecutive wins in recovery → exit
 
 
+# asyncio keeps only a weak reference to a task; without a strong one these
+# detached writes can be collected before they run, silently losing a reset.
+_bg_tasks: set = set()
+
+
+def _spawn(coro):
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return task
+
+
 def _seconds_until_midnight_utc() -> float:
     now = datetime.now(timezone.utc)
     tomorrow = (now + timedelta(days=1)).replace(
@@ -120,12 +132,12 @@ class CircuitBreaker:
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                loop.create_task(self._save_state())
-                loop.create_task(self._bus.publish("CIRCUIT_BREAKER_RESET", {
+                _spawn(self._save_state())
+                _spawn(self._bus.publish("CIRCUIT_BREAKER_RESET", {
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }))
                 # Restore base risk on reset
-                loop.create_task(self._publish_risk_override(_BASE_RISK, "CB reset"))
+                _spawn(self._publish_risk_override(_BASE_RISK, "CB reset"))
         except Exception:
             pass
 
@@ -300,7 +312,7 @@ class CircuitBreaker:
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    loop.create_task(self._save_state())
+                    _spawn(self._save_state())
             except Exception:
                 pass
 

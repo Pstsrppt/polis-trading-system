@@ -20,6 +20,22 @@ _clients: list[WebSocket] = []
 _recent: deque[dict] = deque(maxlen=100)
 _listener_started  = False
 _scheduler_started = False
+# asyncio keeps only a weak reference to a task, so a fire-and-forget
+# create_task() can be garbage collected mid-run. That is exactly what killed
+# the Redis listener 12 seconds after start ("Task was destroyed but it is
+# pending!"), and the dashboard stopped receiving every live event for hours
+# while the gateway still answered REST calls and looked healthy.
+_background_tasks: set = set()
+_listener_task = None
+_scheduler_task = None
+
+
+def _spawn(coro):
+    """create_task that keeps a strong reference until the task finishes."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 _pg: asyncpg.Pool | None = None
 _redis_pub: aioredis.Redis | None = None
 
@@ -282,10 +298,10 @@ async def _redis_listener() -> None:
                 await _broadcast(frame)
                 # Auto-generate social post when a trade closes
                 if topic == "TRADE_CLOSED":
-                    asyncio.create_task(_auto_queue_trade_post(data))
+                    _spawn(_auto_queue_trade_post(data))
                 # Manual orders are written as PENDING; MT5 has the final say
                 if topic == "MT5_ORDER_RESULT":
-                    asyncio.create_task(_settle_manual_trade(data))
+                    _spawn(_settle_manual_trade(data))
         except Exception as exc:
             log.error("Listener error (reconnecting in 3s): %s", exc)
             await asyncio.sleep(3)
@@ -293,14 +309,19 @@ async def _redis_listener() -> None:
 
 @app.middleware("http")
 async def ensure_listener(request, call_next):
-    global _listener_started, _scheduler_started
-    if not _listener_started:
+    global _listener_started, _scheduler_started, _listener_task, _scheduler_task
+    # Restart on a dead task as well as a missing one: the previous version set
+    # the flag once and never looked again, so when the listener died the
+    # gateway never picked the event stream back up.
+    if not _listener_started or _listener_task is None or _listener_task.done():
+        if _listener_task is not None and _listener_task.done():
+            log.error("Redis listener task had stopped — restarting it")
         _listener_started = True
-        asyncio.create_task(_redis_listener())
+        _listener_task = _spawn(_redis_listener())
         log.info("Listener task auto-started")
-    if not _scheduler_started:
+    if not _scheduler_started or _scheduler_task is None or _scheduler_task.done():
         _scheduler_started = True
-        asyncio.create_task(_scheduled_post_worker())
+        _scheduler_task = _spawn(_scheduled_post_worker())
         log.info("Scheduled post worker auto-started")
     return await call_next(request)
 
@@ -1863,7 +1884,7 @@ async def _refresh_thb_rate() -> None:
 
 @app.on_event("startup")
 async def _start_thb_refresh():
-    asyncio.create_task(_refresh_thb_rate())
+    _spawn(_refresh_thb_rate())
 
 
 _MISSION_TIERS = [
@@ -2633,10 +2654,10 @@ async def social_ideas() -> list:
 
 @app.websocket("/ws/feed")
 async def feed(ws: WebSocket) -> None:
-    global _listener_started
-    if not _listener_started:
+    global _listener_started, _listener_task
+    if not _listener_started or _listener_task is None or _listener_task.done():
         _listener_started = True
-        asyncio.create_task(_redis_listener())
+        _listener_task = _spawn(_redis_listener())
 
     await ws.accept()
     _clients.append(ws)

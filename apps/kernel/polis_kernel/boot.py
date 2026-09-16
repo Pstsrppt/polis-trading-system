@@ -33,6 +33,19 @@ log = get_logger("kernel.boot")
 import redis.asyncio as aioredis  # noqa: E402 — after logger setup
 
 
+# asyncio holds only a weak reference to a task, so a detached create_task() can
+# be collected before it finishes. Keep every background task referenced until
+# it completes — the gateway lost its whole event stream to exactly this.
+_background_tasks: set = set()
+
+
+def _spawn(coro):
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
 async def _run_analysis(bus, policy, data: dict) -> None:
     """Answer a dashboard ANALYZE_REQUEST with a preview — never opens a trade."""
     from .analyze import analyze  # noqa: PLC0415 — keeps kernel start-up light
@@ -97,7 +110,7 @@ async def _control_listener(bus, policy) -> None:
                 elif topic == "ANALYZE_REQUEST":
                     # Preview only — analyze.analyze() never reaches TradeHandler.
                     # Run detached so a slow LLM call cannot stall the listener.
-                    asyncio.create_task(_run_analysis(bus, policy, data))
+                    _spawn(_run_analysis(bus, policy, data))
         except Exception as exc:
             log.warning("Control listener disconnected: %s — retrying in 5s", exc)
             await asyncio.sleep(5)
