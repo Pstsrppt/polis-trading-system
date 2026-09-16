@@ -3,8 +3,10 @@ import asyncio
 import json
 import logging
 import os
+import time
 from collections import deque
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import asyncpg
 import redis.asyncio as aioredis
@@ -52,6 +54,7 @@ TOPICS = [
     "TRADING_PAUSED", "TRADING_RESUMED", "RISK_OVERRIDE", "BOARD_TRIGGER",
     "WORLD_UPDATE", "SETTINGS_UPDATE",
     "CIRCUIT_BREAKER_TRIGGERED", "CIRCUIT_BREAKER_RESET",
+    "ANALYZE_RESULT", "MT5_ORDER_RESULT",
 ]
 
 _WORLD_KEY    = "polis:world"
@@ -280,6 +283,9 @@ async def _redis_listener() -> None:
                 # Auto-generate social post when a trade closes
                 if topic == "TRADE_CLOSED":
                     asyncio.create_task(_auto_queue_trade_post(data))
+                # Manual orders are written as PENDING; MT5 has the final say
+                if topic == "MT5_ORDER_RESULT":
+                    asyncio.create_task(_settle_manual_trade(data))
         except Exception as exc:
             log.error("Listener error (reconnecting in 3s): %s", exc)
             await asyncio.sleep(3)
@@ -992,6 +998,14 @@ async def notify_test() -> dict:
 # ── Circuit Breaker ───────────────────────────────────────────────────────────
 
 _CB_KEY = "polis:circuit_breaker"
+
+
+@app.post("/circuit-breaker/reset")
+async def circuit_breaker_reset() -> dict:
+    """Clear a tripped breaker without waiting for the midnight UTC auto-reset."""
+    r = await _get_pub()
+    await r.publish("CIRCUIT_BREAKER_RESET_REQUEST", json.dumps({"by": "dashboard"}))
+    return {"ok": True}
 
 
 @app.get("/circuit-breaker")
@@ -1883,6 +1897,114 @@ async def mt5_live() -> dict:
     return {"error": "MT5 bridge ไม่ได้รัน หรือยังไม่ได้ connect"}
 
 
+_ANALYZE_COOLDOWN_SEC = 10.0
+_last_analyze: dict[str, float] = {}
+
+
+@app.post("/analyze")
+async def analyze_request(body: dict) -> dict:
+    """Ask the kernel for a trade preview on `symbol`.
+
+    Analysis only — this never opens a position. The answer arrives
+    asynchronously as an ANALYZE_RESULT event on the WebSocket feed.
+    """
+    symbol = str(body.get("symbol", "XAUUSD")).upper().replace("/", "")
+
+    waited = time.monotonic() - _last_analyze.get(symbol, 0.0)
+    if waited < _ANALYZE_COOLDOWN_SEC:
+        raise HTTPException(
+            status_code=429,
+            detail=f"รออีก {_ANALYZE_COOLDOWN_SEC - waited:.0f} วินาที ก่อนวิเคราะห์ {symbol} ซ้ำ",
+        )
+    _last_analyze[symbol] = time.monotonic()
+
+    req_id = uuid4().hex[:12]
+    r = await _get_pub()
+    await r.publish("ANALYZE_REQUEST", json.dumps({"symbol": symbol, "req_id": req_id}))
+    return {"ok": True, "symbol": symbol, "req_id": req_id}
+
+
+async def _settle_manual_trade(data: dict) -> None:
+    """Close out the PENDING row a manual order left behind.
+
+    The bridge is the only component that knows whether MT5 accepted the order,
+    so the row stays PENDING until MT5_ORDER_RESULT arrives — otherwise a
+    rejected order (market closed, duplicate, un-closable hedge) would sit in
+    the database as a position that never existed.
+    """
+    if str(data.get("source")) != "manual":
+        return
+    pool = await _ensure_pg()
+    if pool is None:
+        return
+
+    ok     = bool(data.get("ok"))
+    ticket = str(data.get("ticket") or "") or "MANUAL"
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE trade_decisions
+                      SET outcome         = $1,
+                          broker_order_id = $2,
+                          reason          = reason || ' · ' || $3
+                    WHERE id = (SELECT id FROM trade_decisions
+                                 WHERE outcome = 'PENDING'
+                                   AND broker_order_id = 'MANUAL'
+                                   AND symbol = $4 AND direction = $5
+                                 ORDER BY id DESC LIMIT 1)""",
+                "APPROVED" if ok else "REJECTED",
+                ticket if ok else "MANUAL",
+                str(data.get("reason") or ""),
+                str(data.get("symbol") or ""),
+                str(data.get("direction") or ""),
+            )
+    except Exception as exc:
+        log.warning("could not settle manual trade: %s", exc)
+
+
+async def _record_manual_trade(symbol: str, direction: str, lots: float,
+                               stop: float, advice: dict) -> None:
+    """Log a manual order in trade_decisions so analytics can see it later.
+
+    Records whether the trader followed or overrode the AI's call — the
+    comparison is the whole point of keeping manual trades in the same table.
+    """
+    pool = await _ensure_pg()
+    if pool is None:
+        return
+
+    if not advice:
+        note = "manual จากหน้าเว็บ (ไม่ได้วิเคราะห์ก่อน)"
+    elif not advice.get("recommended"):
+        note = (f"manual · ฝืนคำแนะนำ — AI ว่า "
+                f"{advice.get('direction') or 'ไม่ควรเข้า'} {advice.get('confidence', '?')}%")
+    elif advice.get("direction") and advice["direction"] != direction:
+        note = (f"manual · สวนทาง AI — AI ว่า {advice['direction']} "
+                f"{advice.get('confidence', '?')}%")
+    else:
+        note = f"manual · ตามคำแนะนำ AI {advice.get('confidence', '?')}%"
+
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO trade_decisions
+                   (task_id, symbol, direction, price, risk, stop, lots,
+                    outcome, confidence, reason, broker_order_id)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,'PENDING',$8,$9,'MANUAL')""",
+                uuid4().hex,
+                symbol,
+                direction,
+                float(advice.get("price") or 0),
+                float(advice.get("risk") or 0),
+                stop,
+                lots,
+                int(advice.get("confidence") or 0) or None,
+                note,
+            )
+    except Exception as exc:
+        log.warning("could not record manual trade: %s", exc)
+
+
 @app.post("/mt5/manual")
 async def mt5_manual_trade(body: dict) -> dict:
     """Publish a manual trade directly to the MT5 bridge via TRADE_APPROVED."""
@@ -1890,6 +2012,7 @@ async def mt5_manual_trade(body: dict) -> dict:
     symbol    = str(body.get("symbol", "XAUUSD")).upper().replace("/", "")
     lots      = float(body.get("lots", 0.01))
     stop      = float(body.get("stop", 0))
+    advice    = body.get("advice") or {}
 
     if direction not in ("long", "short"):
         raise HTTPException(status_code=400, detail="direction must be 'long' or 'short'")
@@ -1901,12 +2024,15 @@ async def mt5_manual_trade(body: dict) -> dict:
         "symbol":     symbol,
         "lots":       round(lots, 2),
         "stop":       round(stop, 5),
-        "confidence": 100,
+        "confidence": int(advice.get("confidence") or 100),
         "db_id":      None,
         "source":     "manual",
+        "followed_advice": bool(advice) and advice.get("direction") == direction
+                           and bool(advice.get("recommended")),
     }
     r = await _get_pub()
     await r.publish("TRADE_APPROVED", json.dumps(payload))
+    await _record_manual_trade(symbol, direction, round(lots, 2), round(stop, 5), advice)
     return {"ok": True, "symbol": symbol, "direction": direction, "lots": lots}
 
 

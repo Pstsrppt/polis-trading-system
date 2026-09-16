@@ -33,6 +33,20 @@ log = get_logger("kernel.boot")
 import redis.asyncio as aioredis  # noqa: E402 — after logger setup
 
 
+async def _run_analysis(bus, policy, data: dict) -> None:
+    """Answer a dashboard ANALYZE_REQUEST with a preview — never opens a trade."""
+    from .analyze import analyze  # noqa: PLC0415 — keeps kernel start-up light
+
+    req_id = str(data.get("req_id", ""))
+    symbol = str(data.get("symbol", "XAUUSD"))
+    try:
+        result = await analyze(symbol, policy)
+    except Exception as exc:
+        log.warning("ANALYZE_REQUEST failed for %s: %s", symbol, exc)
+        result = {"symbol": symbol, "ok": False, "error": f"วิเคราะห์ไม่สำเร็จ: {exc}"}
+    await bus.publish("ANALYZE_RESULT", {**result, "req_id": req_id})
+
+
 async def _control_listener(bus, policy) -> None:
     """Listen for dashboard control commands published by the gateway."""
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -44,6 +58,7 @@ async def _control_listener(bus, policy) -> None:
             await pubsub.subscribe(
                 "TRADING_PAUSED", "TRADING_RESUMED",
                 "RISK_OVERRIDE", "BOARD_TRIGGER", "SETTINGS_UPDATE",
+                "ANALYZE_REQUEST", "CIRCUIT_BREAKER_RESET_REQUEST",
             )
             async for msg in pubsub.listen():
                 if msg["type"] != "message":
@@ -76,6 +91,13 @@ async def _control_listener(bus, policy) -> None:
                 elif topic == "SETTINGS_UPDATE":
                     log.info("SETTINGS_UPDATE from dashboard: %s", data)
                     await bus.dispatch("SETTINGS_UPDATE", data)
+                elif topic == "CIRCUIT_BREAKER_RESET_REQUEST":
+                    log.info("CIRCUIT_BREAKER_RESET_REQUEST from dashboard")
+                    await bus.dispatch("CIRCUIT_BREAKER_RESET_REQUEST", data)
+                elif topic == "ANALYZE_REQUEST":
+                    # Preview only — analyze.analyze() never reaches TradeHandler.
+                    # Run detached so a slow LLM call cannot stall the listener.
+                    asyncio.create_task(_run_analysis(bus, policy, data))
         except Exception as exc:
             log.warning("Control listener disconnected: %s — retrying in 5s", exc)
             await asyncio.sleep(5)

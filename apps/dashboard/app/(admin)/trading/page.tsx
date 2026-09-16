@@ -18,6 +18,7 @@ const EV_COLOR: Record<string,string> = {
   POLICY_BLOCKED:"#f59e0b", TRADE_SIGNAL:"#06b6d4", RESEARCH_COMPLETE:"#8b5cf6",
   TRADE_APPROVED:"#10b981", BOARD_RESOLUTION:"#ec4899", POLICY_ADJUSTED:"#ef4444",
   SIGNAL_APPROVED:"#06b6d4", SIGNAL_REJECTED:"#f59e0b", WORLD_UPDATE:"#34d399",
+  ANALYZE_RESULT:"#8b5cf6", MT5_ORDER_RESULT:"#0ea5e9",
 };
 
 /* ── helpers ─────────────────────────────────────────────────────────── */
@@ -36,6 +37,15 @@ function evSummary(ev:Ev):string {
     case "POLICY_ADJUSTED":  return `max_risk → ${(Number(d.new_risk??0)*100).toFixed(2)}%`;
     case "AGENT_HIRED":      return `${d.role} joined ${d.division}`;
     case "TRADE_SIGNAL":     return `${String(d.direction??"").toUpperCase()} ${d.symbol} @ $${fmtPrice(Number(d.price??0))}`;
+    case "MT5_ORDER_RESULT":
+      return `${d.ok?"✅":"❌"} ${String(d.direction??"").toUpperCase()} ${d.symbol} — ${d.reason??""}`;
+    case "ANALYZE_RESULT":{
+      if(!d.ok) return `${d.symbol} — ${d.error??"วิเคราะห์ไม่สำเร็จ"}`;
+      const dir=d.direction?String(d.direction).toUpperCase():"ไม่แนะนำให้เข้า";
+      const bar=d.recommended?"ผ่านเกณฑ์":`ต่ำกว่าเกณฑ์ ${d.threshold}%`;
+      const tgt=d.tp?` · เป้า ${fmtPrice(Number(d.tp))}`:"";
+      return `${d.symbol} · ${dir} · ${d.confidence}% (${bar})${tgt}`;
+    }
     default: return JSON.stringify(d).slice(0,80);
   }
 }
@@ -612,6 +622,343 @@ const CONTRACT_SIZE: Record<string, number> = {
   XAUUSD: 100, EURUSD: 100000, GBPUSD: 100000, XAGUSD: 5000,
 };
 
+type CbState = { triggered:boolean; reason:string; consec:number; day_notional:number;
+  daily_budget:number; max_consec:number; triggered_at:string|null };
+
+/** Only rendered while the breaker is tripped — trading is halted until it clears. */
+function CircuitBreakerBanner({ cb, onReset }: { cb: CbState; onReset: () => void }) {
+  const [resetting, setResetting] = useState(false);
+  const tripped = cb.triggered_at ? new Date(cb.triggered_at).toLocaleTimeString("th-TH",
+    { timeZone: "Asia/Bangkok", hour12: false }) : "";
+
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap" as const, alignItems: "center", gap: 14,
+      background: "linear-gradient(135deg,rgba(239,68,68,0.12),rgba(239,68,68,0.04))",
+      border: "1px solid rgba(239,68,68,0.35)", borderRadius: 12,
+      padding: "14px 18px", marginBottom: 16 }}>
+      <span style={{ fontSize: 22 }}>⛔</span>
+      <div style={{ flex: 1, minWidth: 220 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: "#b91c1c", marginBottom: 2 }}>
+          Circuit Breaker ตัดการเทรดอยู่ — ระบบจะไม่เปิดไม้ใหม่
+        </div>
+        <div style={{ fontSize: 11, color: "#7f1d1d", lineHeight: 1.6 }}>
+          {cb.reason || "ไม่ระบุเหตุผล"}
+          {tripped && <> · ตัดเมื่อ {tripped} น.</>}
+          <br/>
+          ใช้งบไปแล้ว ${cb.day_notional.toFixed(2)} จาก ${cb.daily_budget.toFixed(0)} ·
+          {" "}ปฏิเสธติดกัน {cb.consec}/{cb.max_consec}
+        </div>
+      </div>
+      <button type="button" disabled={resetting}
+        onClick={() => { setResetting(true); onReset(); }}
+        style={{ padding: "9px 18px", borderRadius: 9, border: "none", fontSize: 12,
+          fontWeight: 800, cursor: resetting ? "wait" : "pointer",
+          background: resetting ? "#e2e8f0" : "#dc2626",
+          color: resetting ? "#94a3b8" : "#fff",
+          boxShadow: resetting ? "none" : "0 2px 12px rgba(220,38,38,0.35)" }}>
+        {resetting ? "กำลังปลด…" : "ปลดและเทรดต่อ"}
+      </button>
+    </div>
+  );
+}
+
+/* ════ AI ANALYSE + QUICK ORDER ═════════════════════════════════════════ */
+
+type Analysis = {
+  symbol: string; ok: boolean; error?: string;
+  price?: number; direction?: string; sentiment?: string; regime?: string;
+  confidence?: number; threshold?: number; recommended?: boolean; factors?: string[];
+  atr?: number; stop?: number; risk?: number;
+  sl?: number; tp?: number; lots?: number; risk_usd?: number; reward_usd?: number;
+};
+
+/** Donut showing confidence against the bar the bot itself would apply. */
+function ConfidenceRing({ value, threshold, color }: { value: number; threshold: number; color: string }) {
+  const R = 25, SIZE = 64, MID = SIZE / 2;
+  const circumference = 2 * Math.PI * R;
+  const filled = Math.max(0, Math.min(100, value)) / 100 * circumference;
+  const ang = (Math.max(0, Math.min(100, threshold)) / 100) * 2 * Math.PI - Math.PI / 2;
+  const cos = Math.cos(ang), sin = Math.sin(ang);
+
+  return (
+    <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`} style={{ flex: "none" }}>
+      <circle cx={MID} cy={MID} r={R} fill="none" stroke="rgba(0,0,0,0.07)" strokeWidth={7}/>
+      <circle
+        cx={MID} cy={MID} r={R} fill="none" stroke={color} strokeWidth={7} strokeLinecap="round"
+        strokeDasharray={`${filled} ${circumference - filled}`}
+        transform={`rotate(-90 ${MID} ${MID})`}
+      />
+      {/* the filter's threshold, so you can see how far over or under the bar it landed */}
+      <line
+        x1={MID + (R - 7) * cos} y1={MID + (R - 7) * sin}
+        x2={MID + (R + 7) * cos} y2={MID + (R + 7) * sin}
+        stroke="#0f172a" strokeWidth={2} strokeLinecap="round" opacity={0.55}
+      />
+      <text x={MID} y={MID + 1} textAnchor="middle" dominantBaseline="middle"
+        style={{ fontSize: 17, fontWeight: 900, fill: color, fontFamily: "var(--font-mono,monospace)" }}>
+        {Math.round(value)}
+      </text>
+      <text x={MID} y={MID + 14} textAnchor="middle" dominantBaseline="middle"
+        style={{ fontSize: 7, fill: "#94a3b8", letterSpacing: "0.1em" }}>CONF</text>
+    </svg>
+  );
+}
+
+/** Risk-to-target bar: the red span is 1R, the green span is the reward ratio. */
+function RiskRewardBar({ a }: { a: Analysis }) {
+  const isLong = a.direction === "long";
+  const ratio  = a.risk_usd && a.reward_usd ? a.reward_usd / a.risk_usd : 3;
+
+  return (
+    <div style={{ flex: 1, minWidth: 210 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9,
+        color: "#94a3b8", marginBottom: 5, fontWeight: 700, letterSpacing: "0.06em" }}>
+        <span>ตัดขาดทุน</span>
+        <span style={{ color: "#64748b" }}>ราคาปัจจุบัน {fmtPrice(a.price ?? 0)}</span>
+        <span>เป้าหมาย</span>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center" }}>
+        <div style={{ flex: 1, height: 9, borderRadius: "5px 0 0 5px",
+          background: "linear-gradient(90deg,rgba(239,68,68,0.25),#ef4444)" }}/>
+        <div style={{ width: 13, height: 13, borderRadius: "50%", background: "#0f172a",
+          border: "2px solid #fff", boxShadow: "0 0 0 1.5px rgba(15,23,42,0.25)", zIndex: 1 }}/>
+        <div style={{ flex: ratio, height: 9, borderRadius: "0 5px 5px 0",
+          background: "linear-gradient(90deg,#10b981,rgba(16,185,129,0.25))" }}/>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6,
+        fontSize: 11, fontFamily: "var(--font-mono,monospace)", fontWeight: 700 }}>
+        <span style={{ color: "#ef4444" }}>{fmtPrice(a.sl ?? 0)}</span>
+        <span style={{ color: "#94a3b8", fontSize: 9, fontWeight: 600 }}>
+          {isLong ? "▲ ราคาขึ้น = กำไร" : "▼ ราคาลง = กำไร"}
+        </span>
+        <span style={{ color: "#10b981" }}>{fmtPrice(a.tp ?? 0)}</span>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2, fontSize: 10 }}>
+        <span style={{ color: "#ef4444" }}>เสี่ยง ${(a.risk_usd ?? 0).toFixed(2)}</span>
+        <span style={{ color: "#10b981" }}>ถ้าถึงเป้า +${(a.reward_usd ?? 0).toFixed(2)}</span>
+      </div>
+    </div>
+  );
+}
+
+type OrderResult = { ok?: boolean; reason?: string; symbol?: string; direction?: string; ticket?: number };
+
+function AnalyzePanel({ result, orderResult, onResultConsumed, onSent }: {
+  result: Analysis | null;
+  orderResult: OrderResult | null;
+  onResultConsumed: () => void;
+  onSent: (msg: string) => void;
+}) {
+  const SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD", "XAGUSD"];
+  const [symbol,   setSymbol]   = useState("XAUUSD");
+  const [busy,     setBusy]     = useState(false);
+  const [cooldown, setCooldown] = useState(0);
+  const [err,      setErr]      = useState("");
+  const [armed,    setArmed]    = useState<"" | "long" | "short">("");
+  const [firing,   setFiring]   = useState(false);
+
+  // result arriving over the websocket ends the pending state
+  useEffect(() => { if (result) { setBusy(false); setArmed(""); } }, [result]);
+
+  // MT5 has the final say on an order — release the button only when it answers
+  useEffect(() => { if (orderResult) setFiring(false); }, [orderResult]);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown(c => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
+
+  // a half-pressed fire button disarms itself rather than waiting for a stray click
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(""), 4000);
+    return () => clearTimeout(t);
+  }, [armed]);
+
+  async function runAnalyze() {
+    setErr(""); onResultConsumed(); setBusy(true);
+    try {
+      const r = await fetch(`${GW}/analyze`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setErr(d.detail ?? "gateway ปฏิเสธคำขอ");
+        setBusy(false);
+        return;
+      }
+      setCooldown(10);
+    } catch {
+      setErr("เชื่อมต่อ gateway ไม่ได้");
+      setBusy(false);
+    }
+  }
+
+  async function fire(direction: "long" | "short") {
+    if (armed !== direction) { setArmed(direction); return; }
+    if (!result?.ok) return;
+    setArmed(""); setFiring(true);
+    try {
+      const r = await fetch(`${GW}/mt5/manual`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol:    result.symbol,
+          direction,
+          lots:      result.lots,
+          stop:      result.stop,
+          advice: {
+            direction:   result.direction,
+            confidence:  result.confidence,
+            recommended: result.recommended,
+            price:       result.price,
+            risk:        result.risk,
+          },
+        }),
+      });
+      if (!r.ok) { onSent("❌ gateway ตอบ error"); setFiring(false); return; }
+      const followed = result.recommended && result.direction === direction;
+      onSent(`⏳ ส่ง ${direction.toUpperCase()} ${result.symbol} ${result.lots} lots (${followed ? "ตามคำแนะนำ" : "ฝืนคำแนะนำ"}) — รอผลจาก MT5`);
+      // stays disabled until MT5_ORDER_RESULT lands, so a silent rejection
+      // cannot be mistaken for a button that did nothing
+    } catch {
+      onSent("❌ เชื่อมต่อ gateway ไม่ได้");
+      setFiring(false);
+    }
+  }
+
+  const a        = result;
+  const dirCol   = a?.direction === "long" ? "#10b981" : a?.direction === "short" ? "#ef4444" : "#94a3b8";
+  const confCol  = !a?.ok ? "#94a3b8" : a.recommended ? "#10b981" : "#f59e0b";
+  const canOrder = !!a?.ok && !!a.lots;
+
+  return (
+    <Card accent="#8b5cf6">
+      {/* ── control row ───────────────────────────────────────────── */}
+      <div style={{ display: "flex", flexWrap: "wrap" as const, alignItems: "center", gap: 8, marginBottom: a || busy || err ? 14 : 0 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: "#64748b", marginRight: 2 }}>
+          ถาม AI ว่าตอนนี้ควรเล่นไหม
+        </span>
+
+        <div style={{ display: "flex", gap: 4 }}>
+          {SYMBOLS.map(s => (
+            <button key={s} type="button" onClick={() => setSymbol(s)} style={{
+              padding: "5px 11px", borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: "pointer",
+              fontFamily: "var(--font-mono,monospace)",
+              border: `1px solid ${symbol === s ? "#8b5cf6" : "rgba(0,0,0,0.1)"}`,
+              background: symbol === s ? "rgba(139,92,246,0.1)" : "#fff",
+              color: symbol === s ? "#7c3aed" : "#64748b",
+            }}>{s}</button>
+          ))}
+        </div>
+
+        <button type="button" onClick={runAnalyze} disabled={busy || cooldown > 0} style={{
+          padding: "7px 16px", borderRadius: 9, border: "none", fontSize: 12, fontWeight: 800,
+          cursor: busy || cooldown > 0 ? "not-allowed" : "pointer",
+          background: busy || cooldown > 0 ? "#e2e8f0" : "linear-gradient(135deg,#8b5cf6,#6366f1)",
+          color: busy || cooldown > 0 ? "#94a3b8" : "#fff",
+          boxShadow: busy || cooldown > 0 ? "none" : "0 2px 12px rgba(139,92,246,0.35)",
+        }}>
+          {busy ? "⏳ กำลังวิเคราะห์…" : cooldown > 0 ? `รอ ${cooldown}s` : "🔍 วิเคราะห์"}
+        </button>
+
+        {err && <span style={{ fontSize: 11, color: "#ef4444" }}>{err}</span>}
+      </div>
+
+      {/* ── result ────────────────────────────────────────────────── */}
+      {busy && !a && (
+        <div style={{ fontSize: 11, color: "#94a3b8", fontStyle: "italic", padding: "10px 0" }}>
+          กำลังอ่านราคาสด ภาวะตลาด และข่าว… ปกติใช้เวลาราว 3 วินาที
+        </div>
+      )}
+
+      {a && !a.ok && (
+        <div style={{ fontSize: 12, color: "#b45309", background: "rgba(245,158,11,0.1)",
+          border: "1px solid rgba(245,158,11,0.3)", borderRadius: 9, padding: "10px 14px" }}>
+          ⚠️ {a.error ?? "วิเคราะห์ไม่สำเร็จ"}
+        </div>
+      )}
+
+      {a?.ok && (
+        <div style={{ display: "flex", flexWrap: "wrap" as const, alignItems: "center", gap: 18 }}>
+          <ConfidenceRing value={a.confidence ?? 0} threshold={a.threshold ?? 60} color={confCol}/>
+
+          <div style={{ minWidth: 150 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 3 }}>
+              <span style={{ fontSize: 17, fontWeight: 900, color: dirCol, letterSpacing: "-0.02em" }}>
+                {a.direction === "long" ? "▲ LONG" : a.direction === "short" ? "▼ SHORT" : "⏸ ยังไม่ควรเข้า"}
+              </span>
+              <span style={{ fontSize: 12, fontWeight: 800, color: "#0f172a",
+                fontFamily: "var(--font-mono,monospace)" }}>{a.symbol}</span>
+            </div>
+            <div style={{ fontSize: 10, color: "#64748b", lineHeight: 1.6 }}>
+              {a.recommended
+                ? <>ผ่านเกณฑ์ของระบบ ({a.threshold}%)</>
+                : <>ต่ำกว่าเกณฑ์ {a.threshold}% — ระบบเองจะไม่เข้าไม้นี้</>}
+              <br/>
+              ภาวะตลาด: {a.regime} · {a.lots} lots
+            </div>
+            {!!a.factors?.length && (
+              <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 4, marginTop: 6 }}>
+                {a.factors.map((f, i) => (
+                  <span key={i} style={{ fontSize: 9, padding: "2px 7px", borderRadius: 5,
+                    background: "rgba(99,102,241,0.08)", color: "#6366f1", fontWeight: 600 }}>{f}</span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {a.direction ? <RiskRewardBar a={a}/> : (
+            <div style={{ flex: 1, minWidth: 210, fontSize: 11, color: "#64748b", lineHeight: 1.7 }}>
+              AI มองว่าตลาดยังไม่มีทิศทางชัดเจน จึงไม่มีระดับตัดขาดทุนและเป้าหมายให้
+              ถ้าจะเข้าเองต้องเลือกทิศทางด้านขวา
+            </div>
+          )}
+
+          {canOrder && (
+            <div style={{ display: "flex", flexDirection: "column" as const, gap: 6, minWidth: 132 }}>
+              {(a.direction ? [a.direction as "long" | "short"] : (["long", "short"] as const)).map(d => {
+                const followed = a.recommended && a.direction === d;
+                const col      = d === "long" ? "#10b981" : "#ef4444";
+                return (
+                  <button key={d} type="button" disabled={firing} onClick={() => fire(d)} style={{
+                    padding: "9px 14px", borderRadius: 9, fontSize: 11.5, fontWeight: 800,
+                    cursor: firing ? "wait" : "pointer",
+                    border: followed ? "none" : `1.5px solid ${col}`,
+                    background: armed === d ? "#0f172a" : followed ? col : "#fff",
+                    color: armed === d ? "#fff" : followed ? "#fff" : col,
+                    boxShadow: followed && armed !== d ? `0 2px 12px ${col}44` : "none",
+                  }}>
+                    {firing
+                      ? "⏳ รอ MT5…"
+                      : armed === d
+                        ? "กดอีกครั้งเพื่อยืนยัน"
+                        : followed ? "ยิงตามนี้" : `ยิง ${d.toUpperCase()} (ฝืน)`}
+                  </button>
+                );
+              })}
+              <span style={{ fontSize: 9, color: "#94a3b8", textAlign: "center" as const }}>
+                {a.lots} lots · เสี่ยง ${(a.risk_usd ?? 0).toFixed(0)}
+              </span>
+              {orderResult && (
+                <span style={{ fontSize: 9.5, lineHeight: 1.5, textAlign: "center" as const,
+                  color: orderResult.ok ? "#10b981" : "#ef4444" }}>
+                  {orderResult.ok ? "✅ เปิดไม้แล้ว" : "❌ ไม่สำเร็จ"}
+                  <br/>{orderResult.reason}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function ManualTradePanel({ onSent, thbRate }: { onSent: (msg: string) => void; thbRate: number }) {
   const SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD", "XAGUSD"];
   const SYM_COL: Record<string, string> = {
@@ -1083,6 +1430,9 @@ export default function TradingPage(){
   const[mt5Pos,    setMt5Pos]    = useState<OpenPosition[]>([]);
   const[cfg,       setCfg]       = useState<{thb_per_usd:number}|null>(null);
   const[mt5Prices, setMt5Prices] = useState<Record<string,{bid:number;ask:number;mid:number}>|null>(null);
+  const[analysis,  setAnalysis]  = useState<Analysis|null>(null);
+  const[orderRes,  setOrderRes]  = useState<OrderResult|null>(null);
+  const[cbState,   setCbState]   = useState<CbState|null>(null);
   const wsRef=useRef<WebSocket|null>(null);
   const t0=useRef(Date.now());
 
@@ -1102,6 +1452,8 @@ export default function TradingPage(){
 
     const ph=()=>fetch(`${GW}/health/services`).then(r=>r.json()).then((d:SvcStatus)=>setSvcStatus(d)).catch(()=>setSvcStatus(p=>({...p,gateway:"error"})));
     ph();const ht=setInterval(ph,10_000);
+    const pcb=()=>fetch(`${GW}/circuit-breaker`).then(r=>r.json()).then((d:CbState)=>setCbState(d)).catch(()=>{});
+    pcb();const cbt=setInterval(pcb,10_000);
     const wp=setInterval(loadWorld,300_000);
     fetch(`${GW}/analytics/thb`).then(r=>r.json()).then((d:{thb_per_usd:number})=>setCfg(d)).catch(()=>{});
     const loadMt5=()=>fetch(`${GW}/mt5/live`).then(r=>r.json()).then((d:Record<string,unknown>)=>setMt5Live(d.error?null:d)).catch(()=>setMt5Live(null));
@@ -1147,10 +1499,17 @@ export default function TradingPage(){
         if(ev.topic==="TRADING_RESUMED"){setPaused(false);setLastAction(`Resumed at ${new Date(ev.ts).toLocaleTimeString()}`);}
         if(ev.topic==="RISK_OVERRIDE"){const nr=(d as{max_risk?:number}).max_risk;if(typeof nr==="number"){setMaxRisk(nr);setLastAction(`Risk set to ${(nr*100).toFixed(1)}% · ${new Date(ev.ts).toLocaleTimeString()}`);}}
         if(ev.topic==="WORLD_UPDATE"){setWorldData(d as WorldData);}
+        if(ev.topic==="ANALYZE_RESULT"){setAnalysis(d as Analysis);}
+        if(ev.topic==="MT5_ORDER_RESULT"){
+          const o=d as OrderResult;
+          setOrderRes(o);
+          setLastAction(`${o.ok?"✅":"❌"} ${String(o.direction??"").toUpperCase()} ${o.symbol??""} — ${o.reason??""}`);
+          if(o.ok){loadMt5Pos();loadMt5();}
+        }
       };
     }
     connect();
-    return()=>{wsRef.current?.close();clearInterval(ht);clearInterval(wp);clearInterval(ut);clearInterval(btt);clearInterval(mt);clearInterval(pt);};
+    return()=>{wsRef.current?.close();clearInterval(ht);clearInterval(wp);clearInterval(ut);clearInterval(btt);clearInterval(mt);clearInterval(pt);clearInterval(cbt);};
   },[]);
 
   const ctrlPause =()=>fetch(`${GW}/control/pause`, {method:"POST"}).then(()=>setLastAction(`Paused · ${new Date().toLocaleTimeString()}`)).catch(()=>{});
@@ -1220,6 +1579,22 @@ export default function TradingPage(){
       </div>
 
       <HealthStrip status={svcStatus}/>
+
+      {cbState?.triggered && (
+        <CircuitBreakerBanner cb={cbState} onReset={()=>{
+          fetch(`${GW}/circuit-breaker/reset`,{method:"POST"})
+            .then(()=>setLastAction(`ปลด Circuit Breaker · ${new Date().toLocaleTimeString()}`))
+            .catch(()=>setLastAction("ปลด Circuit Breaker ไม่สำเร็จ"));
+        }}/>
+      )}
+
+      {/* AI second opinion + quick order */}
+      <SectionLabel icon="🤖" label="ถาม AI ก่อนเข้าไม้" accent="#8b5cf6"
+        right={<span style={{fontSize:9,color:"#94a3b8"}}>วิเคราะห์อย่างเดียว ไม่เปิดไม้เอง</span>}/>
+      <div style={{marginBottom:18}}>
+        <AnalyzePanel result={analysis} orderResult={orderRes}
+          onResultConsumed={()=>{setAnalysis(null);setOrderRes(null);}} onSent={setLastAction}/>
+      </div>
 
       {/* Live MT5 Account Widget */}
       {mt5Live && (
