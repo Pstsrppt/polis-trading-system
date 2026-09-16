@@ -1921,6 +1921,9 @@ async def mt5_live() -> dict:
 _ANALYZE_COOLDOWN_SEC = 10.0
 _last_analyze: dict[str, float] = {}
 
+_MANUAL_ORDER_COOLDOWN_SEC = 5.0
+_last_manual_order: dict[str, float] = {}
+
 
 @app.post("/analyze")
 async def analyze_request(body: dict) -> dict:
@@ -2039,6 +2042,17 @@ async def mt5_manual_trade(body: dict) -> dict:
         raise HTTPException(status_code=400, detail="direction must be 'long' or 'short'")
     if lots < 0.01:
         raise HTTPException(status_code=400, detail="lots must be >= 0.01")
+
+    # Stacking is allowed, firing a burst by accident is not. Enforced here as
+    # well as in the UI, since a page reload resets a countdown held in the browser.
+    key = f"{symbol}:{direction}"
+    waited = time.monotonic() - _last_manual_order.get(key, 0.0)
+    if waited < _MANUAL_ORDER_COOLDOWN_SEC:
+        raise HTTPException(
+            status_code=429,
+            detail=f"รออีก {_MANUAL_ORDER_COOLDOWN_SEC - waited:.0f} วินาที ก่อนยิง {symbol} ซ้ำ",
+        )
+    _last_manual_order[key] = time.monotonic()
 
     payload = {
         "direction":  direction,

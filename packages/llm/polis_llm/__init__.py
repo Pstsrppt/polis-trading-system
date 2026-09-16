@@ -15,8 +15,12 @@ from groq import AsyncGroq
 log = logging.getLogger("polis.llm")
 
 _GROQ_MODEL        = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-_GEMINI_MODEL      = "gemini-2.0-flash-lite"
-_OPENROUTER_MODEL  = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-4-scout:free")
+# Providers retire model ids without warning — this chain has now been broken
+# twice that way, and both backups were dead at the same time. The "-latest"
+# alias follows Google's current flash-lite instead of pinning a version that
+# will be withdrawn.
+_GEMINI_MODEL      = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+_OPENROUTER_MODEL  = os.getenv("OPENROUTER_MODEL", "google/gemma-4-31b-it:free")
 _OPENROUTER_URL    = "https://openrouter.ai/api/v1/chat/completions"
 
 _QUOTA_SIGNALS = ("429", "RESOURCE_EXHAUSTED", "quota", "rate_limit", "Too Many")

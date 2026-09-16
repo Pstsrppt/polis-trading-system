@@ -207,11 +207,20 @@ def execute_order(data: dict, open_tickets: dict) -> dict | None:
     db_id      = data.get("db_id")
 
     # ── ตรวจ positions ที่มีอยู่แล้ว ─────────────────────────────
+    # A trader pressing the button is making a deliberate choice to add to a
+    # position; the automatic path still may not stack, so a repeating signal
+    # cannot pile on by itself.
+    allow_stacking = str(data.get("source", "")) == "manual"
+
     existing = get_bridge_positions(symbol)
     for pos in existing:
         is_long = pos.type == mt5.ORDER_TYPE_BUY
 
         if (direction == "long" and is_long) or (direction == "short" and not is_long):
+            if allow_stacking:
+                log.info("➕  STACKING — manual %s %s alongside ticket=%d",
+                         direction.upper(), symbol, pos.ticket)
+                continue
             log.warning("⏭  SKIP — %s %s already open (ticket=%d)",
                         direction.upper(), symbol, pos.ticket)
             order_result(False, data,

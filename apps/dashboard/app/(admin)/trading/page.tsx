@@ -759,12 +759,20 @@ function AnalyzePanel({ result, orderResult, onResultConsumed, onSent }: {
   const [err,      setErr]      = useState("");
   const [armed,    setArmed]    = useState<"" | "long" | "short">("");
   const [firing,   setFiring]   = useState(false);
+  const [fireWait, setFireWait] = useState(0);   // per-order cooldown, seconds
+  const [sent,     setSent]     = useState(0);   // orders fired off this analysis
 
   // result arriving over the websocket ends the pending state
-  useEffect(() => { if (result) { setBusy(false); setArmed(""); } }, [result]);
+  useEffect(() => { if (result) { setBusy(false); setArmed(""); setSent(0); } }, [result]);
 
   // MT5 has the final say on an order — release the button only when it answers
   useEffect(() => { if (orderResult) setFiring(false); }, [orderResult]);
+
+  useEffect(() => {
+    if (fireWait <= 0) return;
+    const t = setTimeout(() => setFireWait(w => w - 1), 1000);
+    return () => clearTimeout(t);
+  }, [fireWait]);
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -820,7 +828,14 @@ function AnalyzePanel({ result, orderResult, onResultConsumed, onSent }: {
           },
         }),
       });
-      if (!r.ok) { onSent("❌ gateway ตอบ error"); setFiring(false); return; }
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        onSent(`❌ ${d.detail ?? "gateway ตอบ error"}`);
+        setFiring(false);
+        return;
+      }
+      setFireWait(5);
+      setSent(n => n + 1);
       const followed = result.recommended && result.direction === direction;
       onSent(`⏳ ส่ง ${direction.toUpperCase()} ${result.symbol} ${result.lots} lots (${followed ? "ตามคำแนะนำ" : "ฝืนคำแนะนำ"}) — รอผลจาก MT5`);
       // stays disabled until MT5_ORDER_RESULT lands, so a silent rejection
@@ -925,9 +940,10 @@ function AnalyzePanel({ result, orderResult, onResultConsumed, onSent }: {
                 const followed = a.recommended && a.direction === d;
                 const col      = d === "long" ? "#10b981" : "#ef4444";
                 return (
-                  <button key={d} type="button" disabled={firing} onClick={() => fire(d)} style={{
+                  <button key={d} type="button" disabled={firing || fireWait > 0} onClick={() => fire(d)} style={{
                     padding: "9px 14px", borderRadius: 9, fontSize: 11.5, fontWeight: 800,
-                    cursor: firing ? "wait" : "pointer",
+                    cursor: firing ? "wait" : fireWait > 0 ? "not-allowed" : "pointer",
+                    opacity: fireWait > 0 && !firing ? 0.55 : 1,
                     border: followed ? "none" : `1.5px solid ${col}`,
                     background: armed === d ? "#0f172a" : followed ? col : "#fff",
                     color: armed === d ? "#fff" : followed ? "#fff" : col,
@@ -935,14 +951,20 @@ function AnalyzePanel({ result, orderResult, onResultConsumed, onSent }: {
                   }}>
                     {firing
                       ? "⏳ รอ MT5…"
-                      : armed === d
-                        ? "กดอีกครั้งเพื่อยืนยัน"
-                        : followed ? "ยิงตามนี้" : `ยิง ${d.toUpperCase()} (ฝืน)`}
+                      : fireWait > 0
+                        ? `รอ ${fireWait}s`
+                        : armed === d
+                          ? "กดอีกครั้งเพื่อยืนยัน"
+                          : sent > 0
+                            ? `ยิงเพิ่มอีกไม้ (${sent} แล้ว)`
+                            : followed ? "ยิงตามนี้" : `ยิง ${d.toUpperCase()} (ฝืน)`}
                   </button>
                 );
               })}
-              <span style={{ fontSize: 9, color: "#94a3b8", textAlign: "center" as const }}>
-                {a.lots} lots · เสี่ยง ${(a.risk_usd ?? 0).toFixed(0)}
+              <span style={{ fontSize: 9, color: sent > 0 ? "#b45309" : "#94a3b8", textAlign: "center" as const }}>
+                {sent > 0
+                  ? `ยิงไปแล้ว ${sent} ไม้ · เสี่ยงรวม ~$${((a.risk_usd ?? 0) * (sent + 1)).toFixed(0)} ถ้ายิงอีก`
+                  : `${a.lots} lots · เสี่ยง $${(a.risk_usd ?? 0).toFixed(0)}`}
               </span>
               {orderResult && (
                 <span style={{ fontSize: 9.5, lineHeight: 1.5, textAlign: "center" as const,
