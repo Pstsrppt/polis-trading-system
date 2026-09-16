@@ -14,10 +14,19 @@ Flow:
 import json
 import math
 import os
+import sys
 import time
 import logging
 import pathlib
 from datetime import datetime, timezone, timedelta
+
+# Thai log lines crash on Windows when stdout falls back to cp1252
+# (console with a legacy codepage, or output redirected to a file).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 try:
     import MetaTrader5 as mt5
@@ -121,6 +130,22 @@ def close_position(pos) -> bool:
     return False
 
 
+def filling_mode_for(symbol: str) -> int:
+    """Pick a filling mode the symbol actually accepts.
+
+    MT5 rejects the order with retcode 10030 otherwise. On this broker XAUUSD
+    and XAGUSD allow FOK+IOC, while EURUSD and GBPUSD allow FOK only — a
+    hardcoded IOC silently made every forex order fail.
+    """
+    info = mt5.symbol_info(symbol)
+    mask = info.filling_mode if info else 0
+    if mask & 2:    # SYMBOL_FILLING_IOC
+        return mt5.ORDER_FILLING_IOC
+    if mask & 1:    # SYMBOL_FILLING_FOK
+        return mt5.ORDER_FILLING_FOK
+    return mt5.ORDER_FILLING_RETURN
+
+
 def modify_sl(ticket: int, new_sl: float, new_tp: float) -> bool:
     req = {
         "action": mt5.TRADE_ACTION_SLTP,
@@ -133,6 +158,40 @@ def modify_sl(ticket: int, new_sl: float, new_tp: float) -> bool:
 
 
 # ── Duplicate Check + Execute ─────────────────────────────────────────
+
+_pub: "redis.Redis | None" = None
+
+
+def _publish(topic: str, payload: dict) -> None:
+    """Best-effort event back to POLIS — telemetry must never break execution."""
+    global _pub
+    try:
+        if _pub is None:
+            _pub = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        _pub.publish(topic, json.dumps(payload))
+    except Exception as exc:
+        log.debug("publish %s failed: %s", topic, exc)
+
+
+def order_result(ok: bool, data: dict, reason: str, ticket: int = 0) -> None:
+    """Report every order outcome, success or not.
+
+    Without this the gateway records an approved trade the moment it publishes
+    TRADE_APPROVED, so a rejection here (market closed, duplicate, hedge that
+    would not close) left the database claiming a position that MT5 never
+    opened — and the dashboard showed nothing at all.
+    """
+    _publish("MT5_ORDER_RESULT", {
+        "ok":        ok,
+        "symbol":    data.get("symbol"),
+        "direction": data.get("direction"),
+        "lots":      data.get("lots"),
+        "source":    data.get("source", "kernel"),
+        "db_id":     data.get("db_id"),
+        "ticket":    ticket,
+        "reason":    reason,
+    })
+
 
 def execute_order(data: dict, open_tickets: dict) -> dict | None:
     """
@@ -155,6 +214,8 @@ def execute_order(data: dict, open_tickets: dict) -> dict | None:
         if (direction == "long" and is_long) or (direction == "short" and not is_long):
             log.warning("⏭  SKIP — %s %s already open (ticket=%d)",
                         direction.upper(), symbol, pos.ticket)
+            order_result(False, data,
+                         f"มีไม้ {direction.upper()} {symbol} เปิดอยู่แล้ว (#{pos.ticket})")
             return None
 
         if (direction == "long" and not is_long) or (direction == "short" and is_long):
@@ -166,12 +227,19 @@ def execute_order(data: dict, open_tickets: dict) -> dict | None:
                 open_tickets.pop(pos.ticket, None)
             else:
                 log.warning("    ❌ Could not close opposite — skipping new order")
+                order_result(False, data,
+                             f"ปิดไม้ตรงข้าม #{pos.ticket} ไม่สำเร็จ — ไม่เปิดไม้ใหม่")
                 return None
 
     # ── Place order ───────────────────────────────────────────────
     tick = mt5.symbol_info_tick(symbol)
     if not tick:
+        # Symbol not in Market Watch yet — subscribe and retry once.
+        mt5.symbol_select(symbol, True)
+        tick = mt5.symbol_info_tick(symbol)
+    if not tick:
         log.error("No tick for %s", symbol)
+        order_result(False, data, f"ไม่มีราคาของ {symbol} — ตลาดน่าจะปิดอยู่")
         return None
 
     if direction == "long":
@@ -197,19 +265,33 @@ def execute_order(data: dict, open_tickets: dict) -> dict | None:
         "magic":        MAGIC,
         "comment":      f"polis#{db_id}",
         "type_time":    mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": filling_mode_for(symbol),
     }
 
     res = mt5.order_send(req)
     if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+        # res.price comes back 0.0 on some brokers/filling modes. Every R
+        # calculation downstream divides by it, so read the real fill from the
+        # position itself — a zero entry fires partial TP instantly at a fake
+        # +200R and drives the short-side trailing stop to 0.
+        entry_price = res.price
+        if not entry_price:
+            opened = mt5.positions_get(ticket=res.order)
+            if opened:
+                entry_price = opened[0].price_open
+        if not entry_price:
+            entry_price = price
+            log.warning("    ⚠ no fill price from MT5 — using requested %.5f", price)
+
         log.info("✅ ORDER PLACED  %s %s  %.2f lots @ %.5f  SL=%.5f  TP=%.5f  ticket=%d",
-                 direction.upper(), symbol, lots, res.price, sl, tp, res.order)
+                 direction.upper(), symbol, lots, entry_price, sl, tp, res.order)
+        order_result(True, data, f"เปิดไม้ที่ {entry_price:.5f}", ticket=res.order)
         return {
             "ticket":    res.order,
             "db_id":     db_id,
             "symbol":    symbol,
             "direction": direction,
-            "entry":     res.price,
+            "entry":     entry_price,
             "sl":        sl,
             "tp":        tp,
             "orig_sl_d": stop_dist,
@@ -219,6 +301,9 @@ def execute_order(data: dict, open_tickets: dict) -> dict | None:
     else:
         log.error("❌ ORDER FAILED  retcode=%s  %s",
                   res.retcode if res else "None", mt5.last_error())
+        comment = getattr(res, "comment", "") if res else ""
+        code    = res.retcode if res else "no response"
+        order_result(False, data, f"MT5 ปฏิเสธ ({code}) {comment}".strip())
         return None
 
 
@@ -244,7 +329,7 @@ def partial_close(pos, pct: float) -> float:
         "magic":        MAGIC,
         "comment":      "polis_partial",
         "type_time":    mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": filling_mode_for(pos.symbol),
     }
     res = mt5.order_send(req)
     if res and res.retcode == mt5.TRADE_RETCODE_DONE:
@@ -334,45 +419,83 @@ def manage_trailing(open_tickets: dict) -> None:
 
 # ── Check Closed ──────────────────────────────────────────────────────
 
-def check_closed_positions(open_tickets: dict, r: "redis.Redis") -> None:
-    if not open_tickets:
-        return
+_REPORTED_KEY  = "polis:mt5_reported_closes"
+_BRIDGE_START  = datetime.now(timezone.utc)
 
-    since = datetime.now(timezone.utc) - timedelta(hours=48)
-    deals = mt5.history_deals_get(since, datetime.now(timezone.utc) + timedelta(hours=1))
+
+def check_closed_positions(open_tickets: dict, r: "redis.Redis") -> None:
+    """Report positions MT5 has closed, driven by deal history rather than memory.
+
+    The old version only looked at `open_tickets`, so a position opened before a
+    bridge restart could never be reported — and a whole night of SL hits went
+    unrecorded, leaving the database showing trades as still open. Deal history
+    survives restarts; a Redis set keeps us from reporting the same close twice.
+    """
+    now   = datetime.now(timezone.utc)
+    deals = mt5.history_deals_get(_BRIDGE_START - timedelta(minutes=5), now + timedelta(hours=1))
     if not deals:
         return
 
-    closed = set()
+    outs: dict[int, list] = {}
+    ins:  dict[int, object] = {}
     for deal in deals:
-        if deal.magic != MAGIC or deal.entry != mt5.DEAL_ENTRY_OUT:
+        if deal.magic != MAGIC:
             continue
-        if deal.position_id not in open_tickets:
-            continue
+        if deal.entry == mt5.DEAL_ENTRY_OUT:
+            outs.setdefault(deal.position_id, []).append(deal)
+        elif deal.entry == mt5.DEAL_ENTRY_IN:
+            ins[deal.position_id] = deal
 
-        meta   = open_tickets[deal.position_id]
-        pnl    = round(deal.profit + deal.commission + deal.swap, 2)
-        result = "WIN" if pnl > 0 else "LOSS"
+    for pid, position_deals in outs.items():
+        # A partial take-profit also produces an OUT deal — only report the
+        # position once MT5 says nothing is left of it.
+        if mt5.positions_get(ticket=pid):
+            continue
+        try:
+            if r.sismember(_REPORTED_KEY, str(pid)):
+                continue
+        except Exception as exc:
+            log.debug("reported-set read failed: %s", exc)
+
+        meta    = open_tickets.get(pid, {})
+        opening = ins.get(pid)
+        last    = max(position_deals, key=lambda d: d.time)
+        pnl     = round(sum(d.profit + d.commission + d.swap for d in position_deals), 2)
+        result  = "WIN" if pnl > 0 else "LOSS"
+
+        db_id = meta.get("db_id")
+        if db_id is None and opening:
+            # Recover the decision id the order was tagged with (polis#1234)
+            tag = str(getattr(opening, "comment", ""))
+            if tag.startswith("polis#") and tag[6:].isdigit():
+                db_id = int(tag[6:])
+
+        direction = meta.get("direction")
+        if not direction and opening is not None:
+            direction = "long" if opening.type == mt5.DEAL_TYPE_BUY else "short"
 
         payload = {
-            "id":         meta["db_id"],
-            "symbol":     meta["symbol"],
-            "direction":  meta["direction"],
-            "entry":      meta["entry"],
-            "exit_price": round(deal.price, 5),
+            "id":         db_id,
+            "symbol":     meta.get("symbol") or last.symbol,
+            "direction":  direction or "",
+            "entry":      meta.get("entry") or (round(opening.price, 5) if opening else 0),
+            "exit_price": round(last.price, 5),
             "pnl_usd":    pnl,
             "result":     result,
-            "lots":       meta["lots"],
+            "lots":       meta.get("lots") or round(sum(d.volume for d in position_deals), 2),
             "source":     "mt5_bridge",
         }
         r.publish("TRADE_CLOSED", json.dumps(payload))
         log.info("📤 TRADE_CLOSED  #%s  %s  P&L=$%.2f  [%s]%s",
-                 meta["db_id"], meta["symbol"], pnl, result,
+                 db_id, payload["symbol"], pnl, result,
                  "  🎯 trailed" if meta.get("be_done") else "")
-        closed.add(deal.position_id)
 
-    for t in closed:
-        open_tickets.pop(t, None)
+        try:
+            r.sadd(_REPORTED_KEY, str(pid))
+            r.expire(_REPORTED_KEY, 7 * 24 * 3600)
+        except Exception as exc:
+            log.debug("reported-set write failed: %s", exc)
+        open_tickets.pop(pid, None)
 
 
 # ── Main ──────────────────────────────────────────────────────────────
