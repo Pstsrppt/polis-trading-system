@@ -52,10 +52,10 @@ services:
       WORLD_MODEL_INTERVAL:         "1800"
       TRADING_HOURS_START:          "0"
       TRADING_HOURS_END:            "23"
-      CB_MAX_CONSECUTIVE_REJECTS:   "7"
-      MAX_RISK:                     "0.006"
-      ACCOUNT_BALANCE_USD:          "10000"
-      DAILY_BUDGET_USD:             "620"
+      CB_MAX_CONSECUTIVE_REJECTS:   "25"
+      MAX_RISK:                     "0.002"
+      ACCOUNT_BALANCE_USD:          "100000"
+      DAILY_BUDGET_USD:             "1000"
       DIVERGENCE_ALERT_THRESHOLD:   "1.0"
     depends_on:
       postgres: { condition: service_healthy }
