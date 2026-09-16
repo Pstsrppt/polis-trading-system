@@ -163,8 +163,9 @@ async def seed_trades(conn, days: int) -> int:
             await conn.execute(
                 """INSERT INTO trade_decisions
                    (task_id, symbol, direction, price, risk, stop, lots, risk_usd, outcome,
-                    confidence, reason, exit_price, exit_at, pnl_usd, trade_result, created_at)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)""",
+                    confidence, reason, exit_price, exit_at, pnl_usd, trade_result, created_at,
+                    is_demo)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,TRUE)""",
                 f"seed-{d}-{i}", symbol, direction, price,
                 round(stop / price, 5), stop, lots, risk_usd, outcome,
                 confidence, reason,

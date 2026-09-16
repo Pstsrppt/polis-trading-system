@@ -491,7 +491,7 @@ async def decisions(limit: int = 50) -> list:
         return []
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM trade_decisions ORDER BY created_at DESC LIMIT $1", limit
+            "SELECT * FROM trade_decisions_live ORDER BY created_at DESC LIMIT $1", limit
         )
     return [
         {**dict(r), "created_at": r["created_at"].isoformat()}
@@ -558,7 +558,7 @@ async def portfolio() -> list:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT id, symbol, direction, price, stop, lots, created_at
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE outcome = 'APPROVED' AND trade_result IS NULL
                ORDER BY created_at DESC
                LIMIT 100"""
@@ -707,7 +707,7 @@ async def trades_history(limit: int = 200, offset: int = 0, status: str = "all")
         where = ""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            f"SELECT * FROM trade_decisions {where} ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+            f"SELECT * FROM trade_decisions_live {where} ORDER BY created_at DESC LIMIT $1 OFFSET $2",
             limit, offset,
         )
     return [_row_to_dict(r) for r in rows]
@@ -726,7 +726,7 @@ async def export_trades_csv():
             """SELECT id, symbol, direction, price AS entry_price, fill_price,
                       exit_price, lots, pnl_usd, trade_result, risk_usd,
                       confidence, reason, created_at, exit_at
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE trade_result IS NOT NULL
                ORDER BY created_at ASC"""
         )
@@ -770,7 +770,7 @@ async def close_trade_manual(trade_id: int, request: Request) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """SELECT id, symbol, direction, price, lots
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE id = $1 AND outcome = 'APPROVED' AND trade_result IS NULL""",
             trade_id,
         )
@@ -821,7 +821,7 @@ async def equity_curve() -> list:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT exit_at AS ts, pnl_usd, trade_result, symbol, direction
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE trade_result IS NOT NULL AND pnl_usd IS NOT NULL
                ORDER BY exit_at ASC NULLS LAST"""
         )
@@ -1084,7 +1084,7 @@ async def briefing_today() -> dict:
                     WHEN 'XAGUSD' THEN 5000
                     ELSE 100 END * price)
                     FILTER (WHERE outcome='APPROVED'), 0)            AS total_notional
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE (created_at AT TIME ZONE 'Asia/Bangkok')::date
                    = (NOW() AT TIME ZONE 'Asia/Bangkok')::date"""
         )
@@ -1100,7 +1100,7 @@ async def briefing_today() -> dict:
                 COUNT(*)                                    AS total,
                 COUNT(*) FILTER (WHERE outcome='APPROVED') AS approved,
                 COUNT(*) FILTER (WHERE outcome='BLOCKED')  AS blocked
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE (created_at AT TIME ZONE 'Asia/Bangkok')::date
                    = (NOW() AT TIME ZONE 'Asia/Bangkok')::date
                GROUP BY symbol ORDER BY total DESC"""
@@ -1112,7 +1112,7 @@ async def briefing_today() -> dict:
                 COALESCE(SUM(pnl_usd) FILTER
                     (WHERE trade_result IS NOT NULL), 0)              AS total_pnl,
                 COUNT(*) FILTER (WHERE trade_result='WIN')           AS wins
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE (created_at AT TIME ZONE 'Asia/Bangkok')::date
                    = (NOW() AT TIME ZONE 'Asia/Bangkok')::date - 1"""
         )
@@ -1180,7 +1180,7 @@ async def analytics() -> dict:
                     (WHERE trade_result IS NOT NULL), 0)                   AS best_trade,
                 COALESCE(MIN(pnl_usd) FILTER
                     (WHERE trade_result IS NOT NULL), 0)                   AS worst_trade
-               FROM trade_decisions"""
+               FROM trade_decisions_live"""
         )
         daily_rows = await conn.fetch(
             """SELECT
@@ -1188,7 +1188,7 @@ async def analytics() -> dict:
                 COALESCE(SUM(pnl_usd), 0)                               AS day_pnl,
                 COUNT(*)                                                 AS trades,
                 COUNT(*) FILTER (WHERE trade_result = 'WIN')             AS wins
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE trade_result IS NOT NULL
                  AND pnl_usd IS NOT NULL
                  AND exit_at >= NOW() - INTERVAL '365 days'
@@ -1200,7 +1200,7 @@ async def analytics() -> dict:
                FROM (
                    SELECT (exit_at AT TIME ZONE 'Asia/Bangkok')::date AS d,
                           SUM(pnl_usd) AS day_pnl
-                   FROM trade_decisions
+                   FROM trade_decisions_live
                    WHERE trade_result IS NOT NULL AND pnl_usd IS NOT NULL
                    GROUP BY d
                ) s"""
@@ -1216,7 +1216,7 @@ async def analytics() -> dict:
                     (WHERE outcome = 'APPROVED'), 0)                     AS total_risk_usd,
                 COALESCE(AVG(risk_usd)  FILTER
                     (WHERE outcome = 'APPROVED' AND risk_usd IS NOT NULL), 0) AS avg_risk_usd
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE trade_result IS NOT NULL
                GROUP BY symbol
                ORDER BY total DESC"""
@@ -1229,7 +1229,7 @@ async def analytics() -> dict:
                 COUNT(*) FILTER (WHERE trade_result = 'WIN')             AS wins,
                 COALESCE(SUM(pnl_usd) FILTER
                     (WHERE trade_result IS NOT NULL), 0)                 AS pnl
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE trade_result IS NOT NULL AND pnl_usd IS NOT NULL
                GROUP BY month
                ORDER BY month DESC
@@ -1603,7 +1603,7 @@ async def signal_stats() -> dict:
                 COUNT(*) FILTER (WHERE trade_result='LOSS') AS losses,
                 COALESCE(SUM(pnl_usd) FILTER (WHERE trade_result IS NOT NULL), 0) AS total_pnl,
                 ROUND(AVG(confidence) FILTER (WHERE confidence IS NOT NULL),1) AS avg_confidence
-               FROM trade_decisions"""
+               FROM trade_decisions_live"""
         )
         broadcasts = await conn.fetchval(
             "SELECT COUNT(*) FROM signal_broadcasts"
@@ -2132,7 +2132,7 @@ async def pnl_calendar(months: int = 3) -> list:
                       SUM(pnl_usd)   AS pnl_usd,
                       COUNT(*)       AS trades,
                       SUM(CASE WHEN trade_result='WIN' THEN 1 ELSE 0 END) AS wins
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE trade_result IS NOT NULL AND exit_at >= $1
                GROUP BY day ORDER BY day""",
             since,
@@ -2165,7 +2165,7 @@ async def best_hours() -> list:
                       COUNT(*)       AS trades,
                       SUM(pnl_usd)   AS pnl_usd,
                       SUM(CASE WHEN trade_result='WIN' THEN 1 ELSE 0 END) AS wins
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE trade_result IS NOT NULL AND exit_at IS NOT NULL
                GROUP BY hour ORDER BY hour"""
         )
@@ -2193,7 +2193,7 @@ async def apply_best_hours() -> dict:
         rows = await conn.fetch(
             """SELECT EXTRACT(HOUR FROM exit_at AT TIME ZONE 'UTC')::int AS hour,
                       COUNT(*) AS trades, SUM(pnl_usd) AS pnl
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE trade_result IS NOT NULL AND exit_at IS NOT NULL
                  AND created_at > NOW() - INTERVAL '30 days'
                GROUP BY hour HAVING COUNT(*) >= 3
@@ -2245,7 +2245,7 @@ async def all_trades_log(limit: int = 500, offset: int = 0) -> list:
             """SELECT id, symbol, direction, price AS entry_price, fill_price,
                       exit_price, lots, pnl_usd, trade_result, risk_usd,
                       confidence, created_at, exit_at
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE trade_result IS NOT NULL
                ORDER BY created_at DESC LIMIT $1 OFFSET $2""",
             limit, offset,
@@ -2279,7 +2279,7 @@ async def backtest(
             """SELECT id, symbol, direction, price AS entry, fill_price,
                       exit_price, lots, pnl_usd, trade_result,
                       stop, confidence, created_at, exit_at
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE trade_result IS NOT NULL AND pnl_usd IS NOT NULL
                ORDER BY created_at ASC"""
         )
@@ -2436,7 +2436,7 @@ async def zapier_trade_approved(since: str = "", request: Request = None) -> lis
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT id, symbol, direction, price, lots, confidence, reason, created_at
-               FROM trade_decisions
+               FROM trade_decisions_live
                WHERE outcome='APPROVED' AND created_at > $1::timestamptz
                ORDER BY created_at DESC LIMIT 20""",
             ts,
@@ -2650,7 +2650,7 @@ async def social_ideas() -> list:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """SELECT symbol, direction, confidence, pnl_usd, trade_result, created_at
-                   FROM trade_decisions
+                   FROM trade_decisions_live
                    WHERE outcome='APPROVED' AND created_at >= NOW() - INTERVAL '24 hours'
                    ORDER BY created_at DESC LIMIT 10"""
             )

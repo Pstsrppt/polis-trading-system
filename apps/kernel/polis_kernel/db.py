@@ -37,6 +37,17 @@ ALTER TABLE trade_decisions ADD COLUMN IF NOT EXISTS exit_price NUMERIC;
 ALTER TABLE trade_decisions ADD COLUMN IF NOT EXISTS exit_at TIMESTAMPTZ;
 ALTER TABLE trade_decisions ADD COLUMN IF NOT EXISTS pnl_usd NUMERIC;
 ALTER TABLE trade_decisions ADD COLUMN IF NOT EXISTS trade_result TEXT;
+-- Demo rows from tools/seed_demo_data.py sit in the same table as real trades,
+-- so every statistic on the dashboard mixed hundreds of invented trades with a
+-- handful of real ones. The seeder is the only writer that uses a "seed-" task
+-- id, which makes the backfill exact.
+ALTER TABLE trade_decisions ADD COLUMN IF NOT EXISTS is_demo BOOLEAN NOT NULL DEFAULT FALSE;
+UPDATE trade_decisions SET is_demo = TRUE WHERE task_id LIKE 'seed-%' AND NOT is_demo;
+CREATE INDEX IF NOT EXISTS trade_decisions_is_demo_idx ON trade_decisions (is_demo);
+-- Reads go through this view so a query cannot forget the filter; writes still
+-- target the table directly.
+CREATE OR REPLACE VIEW trade_decisions_live AS
+    SELECT * FROM trade_decisions WHERE NOT is_demo;
 CREATE TABLE IF NOT EXISTS board_resolutions (
     id          SERIAL PRIMARY KEY,
     resolution  TEXT        NOT NULL,
