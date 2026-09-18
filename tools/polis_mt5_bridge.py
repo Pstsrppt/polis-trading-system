@@ -60,6 +60,7 @@ POLL_SEC         = 3      # ตรวจ positions ทุก N วินาท�
 MT5_PUBLISH_SEC  = 5      # publish MT5 account data ไป Redis ทุก N วินาที
 MT5_ACCOUNT_KEY  = "polis:mt5_live"   # Redis key
 
+_REWARD_RATIO    = float(os.getenv("REWARD_RATIO", "3.0"))  # TP = stop × this
 PARTIAL_TP_R     = 1.0    # ปิด 50% ที่ 1R profit
 PARTIAL_TP_PCT   = 0.5    # ปิดกี่ % (0.5 = ครึ่งหนึ่ง)
 TRAIL_ACTIVATE_R = float(os.getenv("TRAIL_ACTIVATE_R", "1.0"))  # BE at 1R
@@ -147,14 +148,33 @@ def filling_mode_for(symbol: str) -> int:
 
 
 def modify_sl(ticket: int, new_sl: float, new_tp: float) -> bool:
+    """Move the stop on an open position.
+
+    TRADE_ACTION_SLTP identifies an open position with "position" and needs the
+    symbol; "ticket" addresses a *pending order* and returns 10013 Invalid
+    request. Every trailing-stop move had been failing that way, silently,
+    because the result was never logged — so winners that ran past 1R kept their
+    original stop and could give the whole gain back.
+    """
+    positions = mt5.positions_get(ticket=ticket)
+    if not positions:
+        log.warning("modify_sl: position %d not found", ticket)
+        return False
+
     req = {
-        "action": mt5.TRADE_ACTION_SLTP,
-        "ticket": ticket,
-        "sl":     round(new_sl, 5),
-        "tp":     round(new_tp, 5),
+        "action":   mt5.TRADE_ACTION_SLTP,
+        "symbol":   positions[0].symbol,
+        "position": ticket,
+        "sl":       round(new_sl, 5),
+        "tp":       round(new_tp, 5),
     }
     res = mt5.order_send(req)
-    return bool(res and res.retcode == mt5.TRADE_RETCODE_DONE)
+    if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+        return True
+    log.warning("modify_sl failed ticket=%d retcode=%s %s", ticket,
+                res.retcode if res else "None",
+                getattr(res, "comment", "") or mt5.last_error())
+    return False
 
 
 # ── Duplicate Check + Execute ─────────────────────────────────────────
@@ -255,12 +275,12 @@ def execute_order(data: dict, open_tickets: dict) -> dict | None:
         price      = tick.ask
         order_type = mt5.ORDER_TYPE_BUY
         sl         = round(price - stop_dist, 5) if stop_dist else 0
-        tp         = round(price + stop_dist * 3, 5) if stop_dist else 0
+        tp         = round(price + stop_dist * _REWARD_RATIO, 5) if stop_dist else 0
     else:
         price      = tick.bid
         order_type = mt5.ORDER_TYPE_SELL
         sl         = round(price + stop_dist, 5) if stop_dist else 0
-        tp         = round(price - stop_dist * 3, 5) if stop_dist else 0
+        tp         = round(price - stop_dist * _REWARD_RATIO, 5) if stop_dist else 0
 
     req = {
         "action":       mt5.TRADE_ACTION_DEAL,
@@ -344,6 +364,61 @@ def partial_close(pos, pct: float) -> float:
     if res and res.retcode == mt5.TRADE_RETCODE_DONE:
         return close_lots
     return 0.0
+
+
+def rehydrate_open_tickets(open_tickets: dict) -> int:
+    """Rebuild in-memory position state from MT5 after a restart.
+
+    Trailing and partial TP are both driven by open_tickets, so a restart left
+    every already-open position unmanaged: a trade sitting at +1.7R kept its
+    original stop below entry and could hand the entire gain back. The
+    supervisor restarts this process on any crash, which made that the normal
+    case rather than a rare one.
+    """
+    recovered = 0
+    for pos in mt5.positions_get() or []:
+        if pos.magic != MAGIC or pos.ticket in open_tickets:
+            continue
+        is_long = pos.type == mt5.ORDER_TYPE_BUY
+
+        # TP is written once at entry and never moved, so it recovers the
+        # original stop distance even after the stop itself has been trailed.
+        if pos.tp:
+            stop_dist = abs(pos.tp - pos.price_open) / _REWARD_RATIO
+        else:
+            stop_dist = abs(pos.price_open - pos.sl) if pos.sl else 0.0
+
+        price = pos.price_current or pos.price_open
+        gain  = (price - pos.price_open) if is_long else (pos.price_open - price)
+        r     = gain / stop_dist if stop_dist else 0.0
+
+        db_id = None
+        tag = str(getattr(pos, "comment", "") or "")
+        if tag.startswith("polis#") and tag[6:].isdigit():
+            db_id = int(tag[6:])
+
+        open_tickets[pos.ticket] = {
+            "ticket":    pos.ticket,
+            "db_id":     db_id,
+            "symbol":    pos.symbol,
+            "direction": "long" if is_long else "short",
+            "entry":     pos.price_open,
+            "sl":        pos.sl,
+            "tp":        pos.tp,
+            "orig_sl_d": stop_dist,
+            "lots":      pos.volume,
+            # Stop already at or past entry means breakeven was taken.
+            "be_done":   bool(pos.sl) and (pos.sl >= pos.price_open if is_long
+                                           else pos.sl <= pos.price_open),
+            # Past the partial level already: assume it was taken rather than
+            # risk shaving the position a second time.
+            "partial_done": r >= PARTIAL_TP_R,
+        }
+        recovered += 1
+        log.info("♻  RECOVERED  %s %s ticket=%d  entry=%.5f  %.2fR  stop_d=%.5f",
+                 open_tickets[pos.ticket]["direction"].upper(), pos.symbol,
+                 pos.ticket, pos.price_open, r, stop_dist)
+    return recovered
 
 
 def manage_trailing(open_tickets: dict) -> None:
@@ -581,6 +656,7 @@ def main():
             if now - last_check >= POLL_SEC:
                 last_check = now
                 try:
+                    rehydrate_open_tickets(open_tickets)
                     manage_trailing(open_tickets)
                     check_closed_positions(open_tickets, r)
                 except Exception as exc:
