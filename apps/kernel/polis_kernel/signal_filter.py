@@ -24,7 +24,6 @@ log = logging.getLogger("kernel.filter")
 _ACTIVE_SYMBOLS_KEY  = "polis:active_symbols"
 _NEWS_EVENTS_KEY     = "polis:news_events"   # Redis key for manual news events
 _REDIS_URL           = os.getenv("REDIS_URL", "redis://redis:6379/0")
-_NEWS_BUFFER_MINUTES = int(os.getenv("NEWS_BUFFER_MINUTES", "30"))   # legacy default
 # Each side of a release is tunable on its own: hold back into the print, then
 # reopen early enough to trade the reaction rather than sitting it out.
 _NEWS_BEFORE_MIN     = int(os.getenv("NEWS_BLOCK_BEFORE_MINUTES", "15"))

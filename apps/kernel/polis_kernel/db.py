@@ -239,6 +239,43 @@ async def close_trade(
         )
 
 
+async def record_execution(trade_id: int, ticket: int, fill_price: float) -> None:
+    """Store the broker's ticket and actual fill against the decision.
+
+    Kernel trades used to keep broker_order_id = 'SIM' and the signal price,
+    so nothing linked a row to the position MT5 really opened, and the recorded
+    entry was a few points off the real fill.
+    """
+    if _pool is None or not ticket:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE trade_decisions
+                  SET broker_order_id = $1,
+                      fill_price      = COALESCE($2, fill_price)
+                WHERE id = $3""",
+            str(ticket), float(fill_price) or None, trade_id,
+        )
+
+
+async def mark_not_executed(trade_id: int, reason: str) -> None:
+    """Record that the broker never opened this approved trade.
+
+    Without it an order MT5 refused stayed APPROVED forever with no exit, and
+    every statistic counted a position that did not exist.
+    """
+    if _pool is None:
+        return
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE trade_decisions
+                  SET outcome = 'NOT_EXECUTED',
+                      reason  = COALESCE(reason, '') || ' · ' || $1
+                WHERE id = $2 AND outcome = 'APPROVED' AND pnl_usd IS NULL""",
+            reason[:200], trade_id,
+        )
+
+
 async def yesterday_summary() -> dict:
     """Pull yesterday's stats using Asia/Bangkok timezone."""
     if _pool is None:

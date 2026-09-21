@@ -223,7 +223,8 @@ async def _external_listener(bus) -> None:
                 socket_keepalive=True,
             )
             pubsub = r.pubsub()
-            await pubsub.subscribe("TRADE_SIGNAL", "TRADE_CLOSED", "SUBSCRIBE_REQUEST", "SUBSCRIBE_APPROVED")
+            await pubsub.subscribe("TRADE_SIGNAL", "TRADE_CLOSED", "SUBSCRIBE_REQUEST",
+                                   "SUBSCRIBE_APPROVED", "MT5_ORDER_RESULT")
             async for msg in pubsub.listen():
                 if msg["type"] != "message":
                     continue

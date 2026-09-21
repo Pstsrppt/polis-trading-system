@@ -16,6 +16,12 @@ log = logging.getLogger("kernel.tracker")
 _REWARD_RATIO    = float(os.getenv("REWARD_RATIO",    "3.0"))
 _TRAIL_ACTIVATE_R = float(os.getenv("TRAIL_ACTIVATE_R", "1.0"))  # move to BE after 1R
 
+# When MT5 executes the orders, the broker owns the outcome of a trade. This
+# tracker still follows positions for notifications and trailing telemetry, but
+# it must not decide that one closed: its own price feed differs from the
+# broker's, and it was inventing fills for orders MT5 had already refused.
+_EXEC_MT5 = os.getenv("TRADE_EXECUTION", "mt5").lower() == "mt5"
+
 _UNITS_PER_LOT: dict[str, int] = {
     "XAUUSD": 100,
     "EURUSD": 100_000,
@@ -43,12 +49,13 @@ class TradeTracker:
         self._tg      = telegram_bot
         self._open: dict[int, dict] = {}
 
-        bus.subscribe("TRADE_APPROVED", self._on_approved)
-        bus.subscribe("TRADE_SIGNAL",   self._on_tick)
-        bus.subscribe("TRADE_CLOSED",   self._on_closed_external)
+        bus.subscribe("TRADE_APPROVED",   self._on_approved)
+        bus.subscribe("TRADE_SIGNAL",     self._on_tick)
+        bus.subscribe("TRADE_CLOSED",     self._on_closed_external)
+        bus.subscribe("MT5_ORDER_RESULT", self._on_order_result)
         log.info(
-            "TradeTracker ready — TP=%.1fR  trail_BE_at=%.1fR",
-            _REWARD_RATIO, _TRAIL_ACTIVATE_R,
+            "TradeTracker ready — TP=%.1fR  trail_BE_at=%.1fR  closes owned by %s",
+            _REWARD_RATIO, _TRAIL_ACTIVATE_R, "MT5" if _EXEC_MT5 else "internal simulator",
         )
 
     async def init(self) -> None:
@@ -111,12 +118,46 @@ class TradeTracker:
             if t["symbol"] != symbol:
                 continue
             self._update_trail(t, cur_price)
+            if _EXEC_MT5:
+                continue
             result = self._check(t, cur_price)
             if result:
                 to_close.append((trade_id, t, cur_price, result))
 
         for trade_id, t, exit_price, result in to_close:
             await self._close(trade_id, t, exit_price, result)
+
+    async def _on_order_result(self, data: dict) -> None:
+        """The broker refused the order — drop the trade instead of tracking a ghost.
+
+        The bridge rejects duplicates ("already open"), closed markets and
+        unfillable orders, but the kernel never heard about it: it kept
+        simulating those positions and later closed them against its own price
+        feed. Six GBPUSD shorts were recorded closing at the same instant and
+        the same price while MT5 held exactly one, and the circuit breaker
+        halted live trading on the resulting phantom loss.
+        """
+        trade_id = data.get("id") or data.get("db_id")
+        if data.get("ok"):
+            # Link the row to the position MT5 actually opened.
+            if trade_id and data.get("ticket"):
+                try:
+                    await self._db.record_execution(
+                        int(trade_id), int(data["ticket"]), float(data.get("fill_price") or 0),
+                    )
+                except Exception as exc:
+                    log.warning("TradeTracker: could not record ticket for #%s: %s", trade_id, exc)
+            return
+        reason   = str(data.get("reason") or "broker refused the order")
+        if trade_id and trade_id in self._open:
+            del self._open[trade_id]
+        if not trade_id:
+            return
+        try:
+            await self._db.mark_not_executed(int(trade_id), reason)
+            log.info("TradeTracker: #%s not executed — %s", trade_id, reason)
+        except Exception as exc:
+            log.warning("TradeTracker: could not mark #%s unexecuted: %s", trade_id, exc)
 
     async def _on_closed_external(self, data: dict) -> None:
         trade_id = data.get("id")

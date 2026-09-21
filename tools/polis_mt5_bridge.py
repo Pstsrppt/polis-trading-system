@@ -12,7 +12,6 @@ Flow:
 """
 
 import json
-import math
 import os
 import sys
 import time
@@ -193,7 +192,8 @@ def _publish(topic: str, payload: dict) -> None:
         log.debug("publish %s failed: %s", topic, exc)
 
 
-def order_result(ok: bool, data: dict, reason: str, ticket: int = 0) -> None:
+def order_result(ok: bool, data: dict, reason: str, ticket: int = 0,
+                 fill_price: float = 0.0) -> None:
     """Report every order outcome, success or not.
 
     Without this the gateway records an approved trade the moment it publishes
@@ -209,6 +209,7 @@ def order_result(ok: bool, data: dict, reason: str, ticket: int = 0) -> None:
         "source":    data.get("source", "kernel"),
         "db_id":     data.get("db_id"),
         "ticket":    ticket,
+        "fill_price": fill_price,
         "reason":    reason,
     })
 
@@ -314,7 +315,8 @@ def execute_order(data: dict, open_tickets: dict) -> dict | None:
 
         log.info("✅ ORDER PLACED  %s %s  %.2f lots @ %.5f  SL=%.5f  TP=%.5f  ticket=%d",
                  direction.upper(), symbol, lots, entry_price, sl, tp, res.order)
-        order_result(True, data, f"เปิดไม้ที่ {entry_price:.5f}", ticket=res.order)
+        order_result(True, data, f"เปิดไม้ที่ {entry_price:.5f}",
+                     ticket=res.order, fill_price=entry_price)
         return {
             "ticket":    res.order,
             "db_id":     db_id,
