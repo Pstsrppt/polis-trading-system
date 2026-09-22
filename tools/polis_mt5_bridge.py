@@ -368,6 +368,31 @@ def partial_close(pos, pct: float) -> float:
     return 0.0
 
 
+def _wait_for_redis(r: "redis.Redis") -> "redis.Redis":
+    """Block until Redis answers, but keep protecting open positions meanwhile.
+
+    Redis only carries *new* orders; trailing an existing position needs nothing
+    but MT5. The bridge used to exit here, and the supervisor would restart it
+    into the same failure every 15 seconds — so while Docker was down, live
+    positions sat completely unmanaged. One was 1.8R in profit with its stop
+    still on the wrong side of entry, roughly $180 of difference.
+    """
+    orphans: dict = {}
+    while True:
+        try:
+            rehydrate_open_tickets(orphans)
+            manage_trailing(orphans)
+        except Exception as exc:
+            log.debug("degraded-mode position management failed: %s", exc)
+        time.sleep(5)
+        try:
+            r.ping()
+            log.info("Redis back — %s:%d", REDIS_HOST, REDIS_PORT)
+            return r
+        except Exception:
+            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+
+
 def rehydrate_open_tickets(open_tickets: dict) -> int:
     """Rebuild in-memory position state from MT5 after a restart.
 
@@ -596,7 +621,7 @@ def main():
         log.info("Redis connected — %s:%d", REDIS_HOST, REDIS_PORT)
     except Exception as e:
         log.error("Redis connect failed: %s", e)
-        return
+        r = _wait_for_redis(r)
 
     pubsub = r.pubsub()
     pubsub.subscribe("TRADE_APPROVED", "MT5_CLOSE_REQUEST")
