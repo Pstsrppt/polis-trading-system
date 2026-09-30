@@ -56,6 +56,7 @@ MAGIC        = 20250099
 SYMBOL_MAP   = {"XAUUSD": "XAUUSD", "EURUSD": "EURUSD", "GBPUSD": "GBPUSD", "XAGUSD": "XAGUSD"}
 
 POLL_SEC         = 3      # ตรวจ positions ทุก N วินาที
+WATCHDOG_SEC     = 120    # ตรวจสุขภาพระบบทุก N วินาที
 MT5_PUBLISH_SEC  = 5      # publish MT5 account data ไป Redis ทุก N วินาที
 MT5_ACCOUNT_KEY  = "polis:mt5_live"   # Redis key
 
@@ -382,6 +383,9 @@ def _wait_for_redis(r: "redis.Redis") -> "redis.Redis":
         try:
             rehydrate_open_tickets(orphans)
             manage_trailing(orphans)
+            # This is the case that cost six days of trading in September, so
+            # it has to be the one alert that still gets out.
+            watchdog(orphans, redis_ok=False)
         except Exception as exc:
             log.debug("degraded-mode position management failed: %s", exc)
         time.sleep(5)
@@ -609,6 +613,110 @@ def check_closed_positions(open_tickets: dict, r: "redis.Redis") -> None:
         open_tickets.pop(pid, None)
 
 
+# ── Watchdog ──────────────────────────────────────────────────────────
+#
+# Every failure this project has hit was silent: a dead LLM model, a garbage
+# collected event listener, a stop that never moved, Docker down for six days.
+# Each was found by chance, days later. The alerting that existed lived in the
+# kernel — inside Docker — so it died with whatever it was meant to report.
+#
+# The bridge is the only piece outside Docker: supervised, always attached to
+# MT5, and holding the Telegram credentials already. It is the natural place to
+# watch from, and it talks to Telegram directly so nothing in between can mute it.
+
+_TG_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
+_TG_CHAT    = os.getenv("TELEGRAM_CHAT_ID", "")
+_GATEWAY    = os.getenv("WATCHDOG_GATEWAY_URL", "http://localhost:19000")
+_ALERT_GAP  = int(os.getenv("WATCHDOG_REPEAT_MINUTES", "60"))   # don't nag
+_QUIET_HRS  = float(os.getenv("WATCHDOG_NO_TRADE_HOURS", "8"))  # silence = suspicious
+
+_alerts: dict = {}          # key → last sent (monotonic)
+_last_approved = time.time()
+
+
+def tg_alert(key: str, text: str, force: bool = False) -> None:
+    """Send to Telegram at most once per _ALERT_GAP for a given key."""
+    if not _TG_TOKEN or not _TG_CHAT:
+        return
+    now = time.monotonic()
+    if not force and now - _alerts.get(key, -1e9) < _ALERT_GAP * 60:
+        return
+    _alerts[key] = now
+    try:
+        import urllib.request  # noqa: PLC0415
+        payload = json.dumps({"chat_id": _TG_CHAT, "text": text}).encode()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{_TG_TOKEN}/sendMessage",
+            data=payload, headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=10).read()
+        log.info("🔔 alert sent: %s", key)
+    except Exception as exc:
+        log.warning("alert %s failed to send: %s", key, exc)
+
+
+def watchdog(open_tickets: dict, redis_ok: bool) -> None:
+    """Check the things that have actually gone wrong before, and say so."""
+    # 1. Docker / Redis — no new orders can reach us at all
+    if not redis_ok:
+        tg_alert("redis", "⛔ POLIS: ต่อ Redis ไม่ได้\n\nDocker น่าจะดับ ระบบไม่รับสัญญาณใหม่\n"
+                          "ไม้ที่เปิดอยู่ยังมี trailing stop ดูแลตามปกติ")
+        return
+    _alerts.pop("redis", None)
+
+    # 2. Profit left unprotected — the symptom that exposed the broken stop
+    for ticket, meta in list(open_tickets.items()):
+        pos = mt5.positions_get(ticket=ticket)
+        if not pos:
+            continue
+        p = pos[0]
+        stop = meta.get("orig_sl_d") or 0
+        if stop <= 0:
+            continue
+        is_long = p.type == mt5.ORDER_TYPE_BUY
+        gain = (p.price_current - p.price_open) if is_long else (p.price_open - p.price_current)
+        if gain / stop < 1.0:
+            continue
+        safe = (p.sl >= p.price_open) if is_long else (p.sl <= p.price_open)
+        if not safe:
+            tg_alert(f"unprotected:{ticket}",
+                     f"⚠️ POLIS: {p.symbol} กำไร {gain/stop:.1f}R แต่ SL ยังผิดฝั่ง\n\n"
+                     f"entry {p.price_open:.5f} · SL {p.sl:.5f}\n"
+                     f"trailing อาจไม่ทำงาน ตรวจ bridge ด่วน")
+
+    # 3. Gateway unreachable — the container or its listener is gone
+    try:
+        import urllib.request  # noqa: PLC0415
+        urllib.request.urlopen(f"{_GATEWAY}/health", timeout=8).read()
+        _alerts.pop("gateway", None)
+    except Exception:
+        tg_alert("gateway", "⛔ POLIS: เรียก gateway ไม่ได้\n\nหน้าเว็บกับ API น่าจะใช้ไม่ได้")
+
+    # 4. Nothing approved for hours while the market is moving — a dead LLM,
+    #    a tripped breaker or a gate blocking everything all look like this.
+    tick = mt5.symbol_info_tick("EURUSD")
+    market_live = bool(tick) and (time.time() - tick.time) < 600
+    idle_h = (time.time() - _last_approved) / 3600
+    if market_live and idle_h >= _QUIET_HRS:
+        tg_alert("idle", f"⚠️ POLIS: ไม่มีไม้ใหม่มา {idle_h:.0f} ชั่วโมง ทั้งที่ตลาดเปิด\n\n"
+                         f"อาจเป็น LLM ล่ม · circuit breaker ตัด · หรือด่านกรองบล็อกทุกสัญญาณ")
+
+    # 5. Database and broker disagreeing about how many positions exist —
+    #    this is how the phantom portfolio went unnoticed for weeks.
+    try:
+        import urllib.request  # noqa: PLC0415
+        raw = urllib.request.urlopen(f"{_GATEWAY}/mt5/positions", timeout=8).read()
+        api_n = len(json.loads(raw))
+        real_n = len(mt5.positions_get() or [])
+        if api_n != real_n:
+            tg_alert("mismatch", f"⚠️ POLIS: จำนวนไม้ไม่ตรงกัน\n\n"
+                                 f"ระบบเห็น {api_n} · MT5 มีจริง {real_n}")
+        else:
+            _alerts.pop("mismatch", None)
+    except Exception:
+        pass
+
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 def main():
@@ -628,6 +736,7 @@ def main():
 
     open_tickets: dict   = {}
     last_check   = time.time()
+    last_watch   = time.time()
     last_publish = time.time()
     last_price   = time.time()
     PRICE_SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD", "XAGUSD"]
@@ -653,6 +762,8 @@ def main():
                     channel = msg.get("channel", "")
 
                     if channel == "TRADE_APPROVED":
+                        global _last_approved
+                        _last_approved = time.time()
                         log.info("📥 TRADE_APPROVED  #%s  %s %s  conf=%s%%",
                                  data.get("db_id"),
                                  data.get("direction", "?").upper(),
@@ -686,6 +797,9 @@ def main():
                     rehydrate_open_tickets(open_tickets)
                     manage_trailing(open_tickets)
                     check_closed_positions(open_tickets, r)
+                    if now - last_watch >= WATCHDOG_SEC:
+                        last_watch = now
+                        watchdog(open_tickets, redis_ok=True)
                 except Exception as exc:
                     log.error("poll error: %s", exc)
 

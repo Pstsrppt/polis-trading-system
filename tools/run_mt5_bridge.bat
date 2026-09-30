@@ -21,5 +21,9 @@ if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 echo [%date% %time%] starting MT5 bridge >> "%LOGDIR%\mt5_bridge.log"
 python -u tools\polis_mt5_bridge.py >> "%LOGDIR%\mt5_bridge.log" 2>&1
 echo [%date% %time%] bridge exited with code %ERRORLEVEL% — restarting in 15s >> "%LOGDIR%\mt5_bridge.log"
-timeout /t 15 /nobreak > nul
+REM Not "timeout": it refuses to run when stdin is redirected, which it is here
+REM because the whole loop writes to the log. It failed instantly and the bridge
+REM restarted several times a second against a crashing MT5 API instead of
+REM backing off. ping is the delay that survives redirection.
+ping -n 16 127.0.0.1 > nul
 goto loop
