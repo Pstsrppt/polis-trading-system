@@ -61,9 +61,13 @@ MT5_PUBLISH_SEC  = 5      # publish MT5 account data ไป Redis ทุก N �
 MT5_ACCOUNT_KEY  = "polis:mt5_live"   # Redis key
 
 _REWARD_RATIO    = float(os.getenv("REWARD_RATIO", "3.0"))  # TP = stop × this
-PARTIAL_TP_R     = 1.0    # ปิด 50% ที่ 1R profit
+# Taking half off at 1R caps the winners that pay for everything else: in the
+# replay it cost about 40% of total profit. 0 disables it.
+PARTIAL_TP_R     = float(os.getenv("PARTIAL_TP_R", "0"))
 PARTIAL_TP_PCT   = 0.5    # ปิดกี่ % (0.5 = ครึ่งหนึ่ง)
-TRAIL_ACTIVATE_R = float(os.getenv("TRAIL_ACTIVATE_R", "1.0"))  # BE at 1R
+# Trailing from 1R cut trades off mid-move (+$763 vs +$2,355 left alone).
+# 1.5R keeps nearly all the upside and still protects a real gain.
+TRAIL_ACTIVATE_R = float(os.getenv("TRAIL_ACTIVATE_R", "1.5"))
 TRAIL_STEP_R     = 0.5    # trail ทุก 0.5R
 # ════════════════════════════════════════════════════════
 
@@ -443,7 +447,7 @@ def rehydrate_open_tickets(open_tickets: dict) -> int:
                                            else pos.sl <= pos.price_open),
             # Past the partial level already: assume it was taken rather than
             # risk shaving the position a second time.
-            "partial_done": r >= PARTIAL_TP_R,
+            "partial_done": PARTIAL_TP_R <= 0 or r >= PARTIAL_TP_R,
         }
         recovered += 1
         log.info("♻  RECOVERED  %s %s ticket=%d  entry=%.5f  %.2fR  stop_d=%.5f",
@@ -497,7 +501,9 @@ def manage_trailing(open_tickets: dict) -> None:
             r = (entry - price) / orig_sl_d
 
         # ── Partial TP: ปิด 50% เมื่อ profit ≥ PARTIAL_TP_R ────────
-        if r >= PARTIAL_TP_R and not meta.get("partial_done"):
+        # PARTIAL_TP_R = 0 disables this; without the guard "r >= 0" is true
+        # immediately and every position would be halved the moment it opens.
+        if PARTIAL_TP_R > 0 and r >= PARTIAL_TP_R and not meta.get("partial_done"):
             closed_lots = partial_close(pos, PARTIAL_TP_PCT)
             if closed_lots > 0:
                 meta["partial_done"] = True

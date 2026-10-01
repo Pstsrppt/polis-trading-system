@@ -12,6 +12,7 @@ from polis_observability import get_logger
 from .scheduler import Scheduler
 from .orchestrator import Orchestrator
 from .healthcheck import HealthMonitor
+from .burst_watcher import BurstWatcher
 from .mock_signals import MockTradingSignals
 from .research_agent import ResearchAgent
 from .trade_handler import TradeHandler
@@ -239,12 +240,30 @@ async def _external_listener(bus) -> None:
             await asyncio.sleep(5)
 
 
-async def _guarded(name: str, coro) -> None:
-    try:
-        await coro
-    except Exception:
-        log.error("CRASH in %s:\n%s", name, traceback.format_exc())
-        raise
+async def _guarded(name: str, factory) -> None:
+    """Run a long-lived component, restarting it rather than taking the kernel down.
+
+    Everything here runs under one asyncio.gather, which aborts the whole group
+    on the first exception. A single failed Telegram request on 30 September
+    did exactly that: the signal publisher stopped for two days while the
+    container stayed healthy, because its healthcheck only pings Redis.
+
+    Takes a factory rather than a coroutine — a coroutine object cannot be
+    awaited twice, so there would be nothing to restart.
+    """
+    delay = 5
+    while True:
+        try:
+            await factory()
+            log.info("%s finished", name)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.error("CRASH in %s — restarting in %ds:\n%s",
+                      name, delay, traceback.format_exc())
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 300)
 
 
 def _validate_env() -> None:
@@ -324,25 +343,31 @@ async def boot() -> None:
     world = WorldModel(bus=bus, telegram_bot=_telegram)
 
     coros = [
-        _guarded("scheduler",    scheduler.run()),
-        _guarded("health",       health.run()),
-        _guarded("board",        board.run()),
-        _guarded("telegram",     _telegram.run()),
-        _guarded("briefing",     _briefing.run()),
-        _guarded("circuit_breaker", _cb.run()),
-        _guarded("control",      _control_listener(bus, policy)),
-        _guarded("world_model",  world.run()),
-        _guarded("cost_flush",   cost_tracker.flush()),
-        _guarded("expire_subs",      _expire_subscribers_loop(_telegram)),
-        _guarded("weekly_report",    _weekly_subscriber_report(_telegram)),
+        _guarded("scheduler",    lambda: scheduler.run()),
+        _guarded("health",       lambda: health.run()),
+        _guarded("board",        lambda: board.run()),
+        _guarded("telegram",     lambda: _telegram.run()),
+        _guarded("briefing",     lambda: _briefing.run()),
+        _guarded("circuit_breaker", lambda: _cb.run()),
+        _guarded("control",      lambda: _control_listener(bus, policy)),
+        _guarded("world_model",  lambda: world.run()),
+        _guarded("cost_flush",   lambda: cost_tracker.flush()),
+        _guarded("expire_subs",      lambda: _expire_subscribers_loop(_telegram)),
+        _guarded("weekly_report",    lambda: _weekly_subscriber_report(_telegram)),
     ]
     if signals:
-        coros.append(_guarded("signals", signals.run()))
+        coros.append(_guarded("signals", lambda: signals.run()))
     # Always listen for external events from Redis:
     #   TRADE_SIGNAL — TradingView webhooks / external publishers
     #   TRADE_CLOSED — Gateway manual-close endpoint (keeps SignalFilter in sync)
-    coros.append(_guarded("ext_listener", _external_listener(bus)))
-    await asyncio.gather(*coros)
+    # Live MT5 prices cost no API credits, so gaps and sudden runs can be acted
+    # on the moment they happen instead of at the next 30-minute poll.
+    if os.getenv("BURST_WATCHER", "true").lower() == "true":
+        _burst = BurstWatcher(bus)
+        coros.append(_guarded("burst", lambda: _burst.run()))
+    coros.append(_guarded("ext_listener", lambda: _external_listener(bus)))
+    # return_exceptions keeps one escaping error from cancelling the rest
+    await asyncio.gather(*coros, return_exceptions=True)
 
 
 if __name__ == "__main__":

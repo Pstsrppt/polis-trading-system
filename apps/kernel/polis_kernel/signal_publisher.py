@@ -17,6 +17,11 @@ log = logging.getLogger("kernel.td_pub")
 _API_KEY  = os.getenv("TWELVE_DATA_API_KEY", "")
 _BASE_URL = "https://api.twelvedata.com"
 _POLL_S   = int(os.getenv("TD_POLL_SECONDS", "60"))
+# Replay of 38 real trades: at ATR x1.5 most losers were stopped out by noise
+# before going anywhere (25 of 27 never reached 1R). Widening to x3.0, with
+# position size scaled down to hold risk constant, was the single biggest
+# improvement and has a clear optimum rather than improving without bound.
+_STOP_ATR = float(os.getenv("STOP_ATR_MULT", "3.0"))
 
 _RAW = os.getenv("SIGNAL_SYMBOLS", "XAU/USD")
 SYMBOLS = [s.strip() for s in _RAW.split(",") if s.strip()]
@@ -146,7 +151,7 @@ class TwelveDataPublisher:
         name   = cfg["name"] or symbol.replace("/", "")
         atr    = round(price_f * cfg["atr"],    4)
         spread = round(price_f * cfg["spread"], 5)
-        stop   = round(atr * 1.5, 4)
+        stop   = round(atr * _STOP_ATR, 4)
         risk   = round(stop / price_f, 5)
         return {
             "symbol":    name,
@@ -176,7 +181,7 @@ class TwelveDataPublisher:
         price_f = float(price)
         atr     = round(price_f * cfg["atr"],    4)
         spread  = round(price_f * cfg["spread"], 5)
-        stop    = round(atr * 1.5, 4)
+        stop    = round(atr * _STOP_ATR, 4)
         risk    = round(stop / price_f, 5)
         return {
             "symbol":    name,

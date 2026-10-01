@@ -31,7 +31,7 @@ log = logging.getLogger("kernel.analyze")
 
 _REDIS_URL     = os.getenv("REDIS_URL", "redis://redis:6379/0")
 _REWARD_RATIO  = float(os.getenv("REWARD_RATIO", "3.0"))  # matches polis_mt5_bridge
-_STOP_ATR_MULT = 1.5                                      # matches signal_publisher
+_STOP_ATR_MULT = float(os.getenv("STOP_ATR_MULT", "3.0"))  # matches signal_publisher
 
 # dashboard symbol ("XAUUSD") → signal publisher config ("XAU/USD" entry)
 _CFG_BY_NAME: dict[str, dict] = {
