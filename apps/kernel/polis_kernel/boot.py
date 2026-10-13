@@ -61,6 +61,30 @@ async def _run_analysis(bus, policy, data: dict) -> None:
     await bus.publish("ANALYZE_RESULT", {**result, "req_id": req_id})
 
 
+async def _sync_control_state(policy) -> None:
+    """Make the kernel and the dashboard agree on pause and risk at startup.
+
+    The dashboard reads polis:control, but the kernel only learned of a pause
+    from the live pub/sub event and never read the stored value. After the
+    kernel restarted it traded for days while the dashboard still said PAUSED,
+    and a stale max_risk there was being shown as the risk in use.
+
+    A pause is the trader's decision, so it survives a restart. Risk is owned
+    by the kernel, so its real value is what gets published.
+    """
+    r = aioredis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+    try:
+        stored = await r.hget("polis:control", "paused")
+        policy.paused = stored == b"1"
+        await r.hset("polis:control", "max_risk", str(policy.max_risk))
+        log.info("Control state restored — paused=%s  max_risk=%.2f%%",
+                 policy.paused, policy.max_risk * 100)
+    except Exception as exc:
+        log.warning("Could not sync control state: %s", exc)
+    finally:
+        await r.aclose()
+
+
 async def _control_listener(bus, policy) -> None:
     """Listen for dashboard control commands published by the gateway."""
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -308,6 +332,7 @@ async def boot() -> None:
     skills = SkillRegistry.load()
     agents = AgentRegistry(bus=bus)
     policy = PolicyEngine.from_config()
+    await _sync_control_state(policy)
 
     orchestrator = Orchestrator(bus=bus, agents=agents, skills=skills, policy=policy)
     scheduler    = Scheduler(orchestrator=orchestrator)

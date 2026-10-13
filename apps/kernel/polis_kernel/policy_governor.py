@@ -1,5 +1,8 @@
 """PolicyGovernor — board resolutions directly adjust the live risk threshold."""
 import logging
+import os
+
+import redis.asyncio as aioredis
 
 from polis_policy import PolicyEngine
 
@@ -8,6 +11,16 @@ log = logging.getLogger("kernel.policy_gov")
 _STEP = 0.001   # ±0.1% per resolution
 _MIN  = 0.002   # floor  0.2%
 _MAX  = 0.010   # ceiling 1.0%
+
+
+async def _publish_risk(value: float) -> None:
+    r = aioredis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+    try:
+        await r.hset("polis:control", "max_risk", str(value))
+    except Exception as exc:
+        log.warning("PolicyGovernor: could not publish max_risk: %s", exc)
+    finally:
+        await r.aclose()
 
 
 class PolicyGovernor:
@@ -44,3 +57,6 @@ class PolicyGovernor:
             "new_risk":   round(new, 4),
             "directive":  data.get("directive", ""),
         })
+        # The dashboard reads risk from polis:control. Changing it only in
+        # memory left that showing a value the kernel was no longer using.
+        await _publish_risk(new)
