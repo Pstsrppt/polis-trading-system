@@ -638,14 +638,26 @@ _QUIET_HRS  = float(os.getenv("WATCHDOG_NO_TRADE_HOURS", "8"))  # silence = susp
 
 _alerts: dict = {}          # key → last sent (monotonic)
 _last_approved = time.time()
+_mismatch_streak = 0
 
 
-def tg_alert(key: str, text: str, force: bool = False) -> None:
-    """Send to Telegram at most once per _ALERT_GAP for a given key."""
+def _gateway_json(path: str):
+    """Small GET against the gateway; None if it does not answer."""
+    try:
+        import urllib.request  # noqa: PLC0415
+        return json.loads(urllib.request.urlopen(f"{_GATEWAY}{path}", timeout=8).read())
+    except Exception:
+        return None
+
+
+def tg_alert(key: str, text: str, force: bool = False,
+             repeat_minutes: float | None = None) -> None:
+    """Send to Telegram at most once per repeat window for a given key."""
     if not _TG_TOKEN or not _TG_CHAT:
         return
     now = time.monotonic()
-    if not force and now - _alerts.get(key, -1e9) < _ALERT_GAP * 60:
+    gap = (repeat_minutes if repeat_minutes is not None else _ALERT_GAP) * 60
+    if not force and now - _alerts.get(key, -1e9) < gap:
         return
     _alerts[key] = now
     try:
@@ -681,7 +693,10 @@ def watchdog(open_tickets: dict, redis_ok: bool) -> None:
             continue
         is_long = p.type == mt5.ORDER_TYPE_BUY
         gain = (p.price_current - p.price_open) if is_long else (p.price_open - p.price_current)
-        if gain / stop < 1.0:
+        # Only once the trail should already have fired. Checking at 1.0R while
+        # trailing starts at TRAIL_ACTIVATE_R (1.5R) flagged every healthy trade
+        # passing through that band — 18 false alarms in nine days.
+        if gain / stop < TRAIL_ACTIVATE_R + 0.5:
             continue
         safe = (p.sl >= p.price_open) if is_long else (p.sl <= p.price_open)
         if not safe:
@@ -704,8 +719,26 @@ def watchdog(open_tickets: dict, redis_ok: bool) -> None:
     market_live = bool(tick) and (time.time() - tick.time) < 600
     idle_h = (time.time() - _last_approved) / 3600
     if market_live and idle_h >= _QUIET_HRS:
-        tg_alert("idle", f"⚠️ POLIS: ไม่มีไม้ใหม่มา {idle_h:.0f} ชั่วโมง ทั้งที่ตลาดเปิด\n\n"
-                         f"อาจเป็น LLM ล่ม · circuit breaker ตัด · หรือด่านกรองบล็อกทุกสัญญาณ")
+        # Say *why* when we know. A breaker that tripped on the daily budget is
+        # the system doing its job and clears itself at midnight UTC — repeating
+        # that every hour until morning (71 messages) just trains you to ignore
+        # the alert that matters.
+        cb = _gateway_json("/circuit-breaker") or {}
+        ctl = _gateway_json("/control/status") or {}
+        if cb.get("triggered"):
+            tg_alert("idle:cb",
+                     f"ℹ️ POLIS: หยุดเปิดไม้ใหม่ชั่วคราว — circuit breaker ทำงาน\n\n"
+                     f"{cb.get('reason', '')}\n"
+                     f"จะกลับมาเองตอน 07:00 หรือกดปลดในหน้าเว็บ",
+                     repeat_minutes=24 * 60)
+        elif ctl.get("paused"):
+            tg_alert("idle:paused",
+                     "ℹ️ POLIS: ระบบถูก pause อยู่ ไม่เปิดไม้ใหม่\n\nกด Resume ในหน้าเว็บเมื่อพร้อม",
+                     repeat_minutes=24 * 60)
+        else:
+            tg_alert("idle", f"⚠️ POLIS: ไม่มีไม้ใหม่มา {idle_h:.0f} ชั่วโมง ทั้งที่ตลาดเปิด\n\n"
+                             f"circuit breaker ไม่ได้ตัด และไม่ได้ pause\n"
+                             f"น่าจะเป็น LLM ล่มหรือด่านกรองบล็อกทุกสัญญาณ — ควรตรวจ")
 
     # 5. Database and broker disagreeing about how many positions exist —
     #    this is how the phantom portfolio went unnoticed for weeks.
@@ -714,10 +747,18 @@ def watchdog(open_tickets: dict, redis_ok: bool) -> None:
         raw = urllib.request.urlopen(f"{_GATEWAY}/mt5/positions", timeout=8).read()
         api_n = len(json.loads(raw))
         real_n = len(mt5.positions_get() or [])
+        global _mismatch_streak
         if api_n != real_n:
-            tg_alert("mismatch", f"⚠️ POLIS: จำนวนไม้ไม่ตรงกัน\n\n"
-                                 f"ระบบเห็น {api_n} · MT5 มีจริง {real_n}")
+            # The snapshot the gateway serves is refreshed every 5 seconds, so
+            # right after a position closes the two counts briefly disagree.
+            # All six earlier alerts were exactly that. Two checks in a row,
+            # two minutes apart, is a real divergence.
+            _mismatch_streak += 1
+            if _mismatch_streak >= 2:
+                tg_alert("mismatch", f"⚠️ POLIS: จำนวนไม้ไม่ตรงกัน\n\n"
+                                     f"ระบบเห็น {api_n} · MT5 มีจริง {real_n}")
         else:
+            _mismatch_streak = 0
             _alerts.pop("mismatch", None)
     except Exception:
         pass
