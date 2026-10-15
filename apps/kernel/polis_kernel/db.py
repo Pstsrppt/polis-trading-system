@@ -42,6 +42,10 @@ ALTER TABLE trade_decisions ADD COLUMN IF NOT EXISTS trade_result TEXT;
 -- handful of real ones. The seeder is the only writer that uses a "seed-" task
 -- id, which makes the backfill exact.
 ALTER TABLE trade_decisions ADD COLUMN IF NOT EXISTS is_demo BOOLEAN NOT NULL DEFAULT FALSE;
+-- Where the signal came from (poller, burst watcher, webhook). Every signal
+-- already carried it; nothing stored it, so whether bursts help or hurt could
+-- not be measured once the logs rotated.
+ALTER TABLE trade_decisions ADD COLUMN IF NOT EXISTS source TEXT;
 UPDATE trade_decisions SET is_demo = TRUE WHERE task_id LIKE 'seed-%' AND NOT is_demo;
 CREATE INDEX IF NOT EXISTS trade_decisions_is_demo_idx ON trade_decisions (is_demo);
 -- Reads go through this view so a query cannot forget the filter; writes still
@@ -83,6 +87,7 @@ async def save_decision(
     risk_usd: float | None = None,
     broker_order_id: str | None = None,
     fill_price: float | None = None,
+    source: str | None = None,
 ) -> int | None:
     """Insert a trade decision and return the new row ID."""
     if _pool is None:
@@ -92,11 +97,11 @@ async def save_decision(
         row = await conn.fetchrow(
             """INSERT INTO trade_decisions
                (task_id, symbol, direction, price, risk, stop, lots, risk_usd,
-                outcome, confidence, reason, broker_order_id, fill_price)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                outcome, confidence, reason, broker_order_id, fill_price, source)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                RETURNING id""",
             task_id, symbol, direction, price, risk, stop, lots, risk_usd,
-            outcome, confidence, reason, broker_order_id, fill_price,
+            outcome, confidence, reason, broker_order_id, fill_price, source,
         )
     return row["id"] if row else None
 

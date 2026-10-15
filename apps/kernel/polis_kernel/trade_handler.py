@@ -115,6 +115,7 @@ class TradeHandler:
         stop      = data.get("stop", 0)
         atr       = data.get("atr", 10)
         spread    = data.get("spread", 0.5)
+        source    = data.get("source")
 
         # ── 1. Hard policy gate (no LLM cost) ──────────────────────────
         task = Task(
@@ -134,7 +135,7 @@ class TradeHandler:
                     "direction": direction, "reason": decision.reason,
                     "price": price, "risk": risk,
                 }),
-                db.save_decision(
+                db.save_decision(source=source, 
                     task_id=task.id, symbol=symbol, direction=direction,
                     outcome="BLOCKED", price=price, risk=risk, stop=stop,
                     reason=decision.reason,
@@ -220,7 +221,7 @@ class TradeHandler:
             broker_order_id = broker_result.get("order_id")
             fill_price      = broker_result.get("fill_price", price)
 
-            db_id = await db.save_decision(
+            db_id = await db.save_decision(source=source, 
                 task_id=task.id, symbol=symbol, direction=direction,
                 outcome="APPROVED", price=price, risk=risk, stop=stop,
                 confidence=confidence, reason=reason, lots=lots,
@@ -255,7 +256,7 @@ class TradeHandler:
                     "direction": direction, "reason": reason,
                     "llm_confidence": confidence,
                 }),
-                db.save_decision(
+                db.save_decision(source=source, 
                     task_id=task.id, symbol=symbol, direction=direction,
                     outcome="BLOCKED", price=price, risk=risk, stop=stop,
                     confidence=confidence, reason=reason,

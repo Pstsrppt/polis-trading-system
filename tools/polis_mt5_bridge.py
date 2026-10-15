@@ -634,10 +634,12 @@ _TG_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 _TG_CHAT    = os.getenv("TELEGRAM_CHAT_ID", "")
 _GATEWAY    = os.getenv("WATCHDOG_GATEWAY_URL", "http://localhost:19000")
 _ALERT_GAP  = int(os.getenv("WATCHDOG_REPEAT_MINUTES", "60"))   # don't nag
-_QUIET_HRS  = float(os.getenv("WATCHDOG_NO_TRADE_HOURS", "8"))  # silence = suspicious
+_QUIET_HRS  = float(os.getenv("WATCHDOG_NO_TRADE_HOURS", "72"))  # selective filters: days is normal
+_DEAD_HRS   = float(os.getenv("WATCHDOG_NO_RESEARCH_HOURS", "2"))  # kernel should analyse every 30 min
 
 _alerts: dict = {}          # key → last sent (monotonic)
 _last_approved = time.time()
+_last_research = time.time()
 _mismatch_streak = 0
 
 
@@ -713,12 +715,25 @@ def watchdog(open_tickets: dict, redis_ok: bool) -> None:
     except Exception:
         tg_alert("gateway", "⛔ POLIS: เรียก gateway ไม่ได้\n\nหน้าเว็บกับ API น่าจะใช้ไม่ได้")
 
-    # 4. Nothing approved for hours while the market is moving — a dead LLM,
-    #    a tripped breaker or a gate blocking everything all look like this.
+    # 4a. The kernel stopped analysing. Research runs on every signal whether or
+    #     not it ends in a trade, so its absence is a real fault regardless of
+    #     how selective the filters are — the publisher died silently for two
+    #     days once, and approved-trade silence alone could not tell that apart
+    #     from a strict filter doing its job.
     tick = mt5.symbol_info_tick("EURUSD")
     market_live = bool(tick) and (time.time() - tick.time) < 600
+    dead_h = (time.time() - _last_research) / 3600
+    if market_live and dead_h >= _DEAD_HRS:
+        tg_alert("no_research",
+                 f"⛔ POLIS: AI ไม่ได้วิเคราะห์อะไรเลยมา {dead_h:.1f} ชั่วโมง ทั้งที่ตลาดเปิด\n\n"
+                 f"ตัวสร้างสัญญาณหรือ LLM น่าจะหยุดทำงาน — ตรวจ kernel ด่วน")
+    else:
+        _alerts.pop("no_research", None)
+
+    # 4b. Analysis is happening but nothing gets through for days — not a
+    #     fault in itself with a strict confidence bar, but worth knowing.
     idle_h = (time.time() - _last_approved) / 3600
-    if market_live and idle_h >= _QUIET_HRS:
+    if market_live and dead_h < _DEAD_HRS and idle_h >= _QUIET_HRS:
         # Say *why* when we know. A breaker that tripped on the daily budget is
         # the system doing its job and clears itself at midnight UTC — repeating
         # that every hour until morning (71 messages) just trains you to ignore
@@ -736,9 +751,12 @@ def watchdog(open_tickets: dict, redis_ok: bool) -> None:
                      "ℹ️ POLIS: ระบบถูก pause อยู่ ไม่เปิดไม้ใหม่\n\nกด Resume ในหน้าเว็บเมื่อพร้อม",
                      repeat_minutes=24 * 60)
         else:
-            tg_alert("idle", f"⚠️ POLIS: ไม่มีไม้ใหม่มา {idle_h:.0f} ชั่วโมง ทั้งที่ตลาดเปิด\n\n"
-                             f"circuit breaker ไม่ได้ตัด และไม่ได้ pause\n"
-                             f"น่าจะเป็น LLM ล่มหรือด่านกรองบล็อกทุกสัญญาณ — ควรตรวจ")
+            # Research is running (4a would have fired otherwise), so this is
+            # the filters declining everything — expected with a high bar.
+            tg_alert("idle", f"ℹ️ POLIS: ไม่มีไม้ใหม่มา {idle_h:.0f} ชั่วโมง\n\n"
+                             f"AI ยังวิเคราะห์ปกติ แต่ยังไม่มีสัญญาณไหนผ่านเกณฑ์\n"
+                             f"(ความมั่นใจ ≥ 80% และนอกช่วงดึก) — ไม่ใช่ความผิดปกติ",
+                     repeat_minutes=24 * 60)
 
     # 5. Database and broker disagreeing about how many positions exist —
     #    this is how the phantom portfolio went unnoticed for weeks.
@@ -779,7 +797,7 @@ def main():
         r = _wait_for_redis(r)
 
     pubsub = r.pubsub()
-    pubsub.subscribe("TRADE_APPROVED", "MT5_CLOSE_REQUEST")
+    pubsub.subscribe("TRADE_APPROVED", "MT5_CLOSE_REQUEST", "RESEARCH_COMPLETE")
 
     open_tickets: dict   = {}
     last_check   = time.time()
@@ -808,7 +826,11 @@ def main():
                     data    = json.loads(msg["data"])
                     channel = msg.get("channel", "")
 
-                    if channel == "TRADE_APPROVED":
+                    if channel == "RESEARCH_COMPLETE":
+                        global _last_research
+                        _last_research = time.time()
+
+                    elif channel == "TRADE_APPROVED":
                         global _last_approved
                         _last_approved = time.time()
                         log.info("📥 TRADE_APPROVED  #%s  %s %s  conf=%s%%",
