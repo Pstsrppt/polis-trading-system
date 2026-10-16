@@ -31,11 +31,30 @@ def _is_quota_error(exc: Exception) -> bool:
     return any(s in msg for s in _QUOTA_SIGNALS)
 
 
+JSON_ONLY = "\n\nRespond with valid JSON only. No markdown fences."
+
+
+def parse_json(raw: str) -> dict:
+    """Read a model's JSON reply, tolerating markdown fences around it."""
+    cleaned = (
+        (raw or "").strip()
+        .removeprefix("```json")
+        .removeprefix("```")
+        .removesuffix("```")
+        .strip()
+    )
+    return json.loads(cleaned)
+
+
 class LLMClient:
     def __init__(self, model: str = _GROQ_MODEL) -> None:
         self._groq   = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY", ""), max_retries=0)
         self._gemini = None
         self.model   = model
+        # Which provider:model produced the last answer. The chain falls back
+        # silently, so without this a comparison between models can end up
+        # comparing a model with itself.
+        self.last_provider = ""
 
     def _get_gemini(self):
         if self._gemini is None:
@@ -55,6 +74,7 @@ class LLMClient:
                     ],
                 )
                 log.debug("Groq OK")
+                self.last_provider = f"groq:{self.model}"
                 return resp.choices[0].message.content or ""
             except Exception as exc:
                 # Fall through on ANY failure, not just quota. A decommissioned
@@ -74,6 +94,7 @@ class LLMClient:
                     config=types.GenerateContentConfig(system_instruction=system),
                 )
                 log.info("Gemini OK (Groq fallback)")
+                self.last_provider = f"gemini:{_GEMINI_MODEL}"
                 return resp.text or ""
             except Exception as exc:
                 log.warning("Gemini %s (%s) — switching to OpenRouter",
@@ -110,19 +131,13 @@ class LLMClient:
                     continue
                 r.raise_for_status()
                 log.info("OpenRouter OK (tertiary fallback)")
+                self.last_provider = f"openrouter:{_OPENROUTER_MODEL}"
                 return r.json()["choices"][0]["message"]["content"] or ""
         raise RuntimeError("OpenRouter rate limit exceeded after retries")
 
     async def complete_json(self, system: str, user: str) -> dict:
         raw = await self.complete(
-            system=system + "\n\nRespond with valid JSON only. No markdown fences.",
+            system=system + JSON_ONLY,
             user=user,
         )
-        cleaned = (
-            raw.strip()
-            .removeprefix("```json")
-            .removeprefix("```")
-            .removesuffix("```")
-            .strip()
-        )
-        return json.loads(cleaned)
+        return parse_json(raw)

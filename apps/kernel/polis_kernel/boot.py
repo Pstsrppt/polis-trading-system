@@ -13,6 +13,7 @@ from .scheduler import Scheduler
 from .orchestrator import Orchestrator
 from .healthcheck import HealthMonitor
 from .burst_watcher import BurstWatcher
+from .shadow_analyst import ShadowAnalyst
 from .mock_signals import MockTradingSignals
 from .research_agent import ResearchAgent
 from .trade_handler import TradeHandler
@@ -361,6 +362,11 @@ async def boot() -> None:
     _briefing    = DailyBriefing(db_module=db, telegram_bot=_telegram)
     _tracker     = TradeTracker(bus=bus, db_module=db, discord_notifier=_discord, telegram_bot=_telegram)
     await _tracker.init()
+    # Challenger models answer the same research prompt in parallel and are
+    # scored offline. They have no path to an order.
+    if os.getenv("SHADOW_MODELS", "on").lower() not in ("", "off", "none"):
+        _shadow = ShadowAnalyst(bus=bus, db_module=db)
+        await _shadow.init()
 
     await orchestrator.bring_up_executive_board()
     log.info("Executive Board online · CEO/CTO/CFO/COO/CMO")

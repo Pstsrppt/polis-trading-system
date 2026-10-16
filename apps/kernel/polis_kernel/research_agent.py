@@ -209,17 +209,20 @@ class ResearchAgent:
         if social:
             ctx += f"\n\nSocial & News:\n{social}"
 
+        # Built once and published with the result, so shadow models can be
+        # asked the identical question — any other input makes the comparison unfair.
+        prompt = (
+            f"Signal: {direction.upper()} {symbol}\n"
+            f"Price: {price:.5g}  ATR: {atr:.5g}  "
+            f"Spread: {spread:.5g}  Risk: {risk:.3%}"
+            f"{ctx}"
+        )
+        # Cleared first: on a failed call the neutral fallback is used, and a
+        # value left over from the previous call would credit it to a real model.
+        self._llm.last_provider = ""
         try:
             result = await asyncio.wait_for(
-                self._llm.complete_json(
-                    system=_SYSTEM,
-                    user=(
-                        f"Signal: {direction.upper()} {symbol}\n"
-                        f"Price: {price:.5g}  ATR: {atr:.5g}  "
-                        f"Spread: {spread:.5g}  Risk: {risk:.3%}"
-                        f"{ctx}"
-                    ),
-                ),
+                self._llm.complete_json(system=_SYSTEM, user=prompt),
                 timeout=15.0,
             )
         except Exception as exc:
@@ -264,4 +267,6 @@ class ResearchAgent:
             **data,
             "research": research,
             "memory":   memory_hits,
+            "prompt":   prompt,
+            "model":    self._llm.last_provider or "fallback:neutral",
         })
