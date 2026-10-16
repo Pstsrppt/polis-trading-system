@@ -47,7 +47,7 @@ services:
       REDIS_URL:             redis://redis:6379/0
       QDRANT_URL:            http://qdrant:6333
       SIGNAL_SOURCE:                "twelvedata"
-      SIGNAL_SYMBOLS:               "XAU/USD,EUR/USD,GBP/USD,XAG/USD"
+      SIGNAL_SYMBOLS:               "XAU/USD"
       TD_POLL_SECONDS:              "1800"
       WORLD_MODEL_INTERVAL:         "1800"
       TRADING_HOURS_START:          "23"

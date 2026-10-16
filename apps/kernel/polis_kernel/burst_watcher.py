@@ -26,6 +26,7 @@ log = logging.getLogger("kernel.burst")
 
 _REDIS_URL   = os.getenv("REDIS_URL", "redis://redis:6379/0")
 _PRICES_KEY  = "polis:mt5_prices"
+_ACTIVE_KEY  = "polis:active_symbols"
 
 _CHECK_S     = float(os.getenv("BURST_CHECK_SECONDS", "10"))     # how often we look
 _WINDOW_S    = float(os.getenv("BURST_WINDOW_SECONDS", "900"))   # 15 min of history
@@ -71,7 +72,18 @@ class BurstWatcher:
         prices = json.loads(raw)
         now = time.time()
 
+        # Prices keep flowing for every symbol (the dashboard shows them), but a
+        # disabled symbol must not start analysis: the research call costs an
+        # LLM request before the filter gets the chance to turn it away.
+        try:
+            active_raw = await r.get(_ACTIVE_KEY)
+            active = json.loads(active_raw) if active_raw else {}
+        except Exception:
+            active = {}
+
         for symbol, quote in prices.items():
+            if active.get(symbol) is False:
+                continue
             mid = float(quote.get("mid") or 0)
             if mid <= 0:
                 continue
